@@ -67,6 +67,7 @@ def record(row: dict, candidates: dict, sources: list, timings: dict | None = No
     for store in STORES:
         wanted = [s for s in sources if s["store"] == store]
         items = []
+        notes: dict = {}  # a vault candidate's note as a per-row index (no paths in a receipt)
         for it in candidates.get(store) or []:
             lexical, matched = it.get("lexical"), it.get("matched")
             if store == "vault" and (lexical is None or matched is None):
@@ -84,6 +85,10 @@ def record(row: dict, candidates: dict, sources: list, timings: dict | None = No
                 item["matched"] = matched
             if match:
                 item["match"] = match
+            if store == "vault" and it.get("path") is not None:
+                item["note"] = notes.setdefault(it["path"], len(notes))
+            if it.get("named"):
+                item["named"] = True
             if any(M.matches(it, store, s) for s in stale):
                 item["stale"] = True
             if it.get("rerank") is not None:  # 0.13.2 with a reranker loaded
@@ -110,8 +115,8 @@ def _rerank(items: list[dict]) -> list | None:
 
 def _passes(gate: relevance.Gate, store: str, items: list[dict]) -> list[bool]:
     if store == "vault":
-        signals = [{"cosine": it["score"], "lexical": it.get("lexical"), "matched": it.get("matched", 0)}
-                   for it in items]
+        signals = [{"cosine": it["score"], "lexical": it.get("lexical"), "matched": it.get("matched", 0),
+                    "named": bool(it.get("named"))} for it in items]
         return [ok for ok, _ in relevance.decide_vault(gate, signals, PREFETCH_EVIDENCE, _rerank(items))]
     if store == "claims":
         return [gate.claim(it["score"], it.get("lexical"), it.get("rerank"))[0] for it in items]
@@ -123,7 +128,8 @@ def _injected(gate: relevance.Gate, store: str, items: list[dict], passed: list[
     candidates that pass (vault: `relevance.vault_pick`; claims: the first PREFETCH_CLAIMS)."""
     if store == "vault":
         pool = sum(it["pool"] for it in items)
-        return [items[i] for i in relevance.vault_pick(gate, passed, pool, PREFETCH_EVIDENCE, _rerank(items))]
+        return [items[i] for i in relevance.vault_pick(gate, passed, pool, PREFETCH_EVIDENCE, _rerank(items),
+                                                       notes=[it.get("note") for it in items])]
     if store == "claims":
         return [it for it, ok in zip(items, passed) if it["pool"] and ok][:PREFETCH_CLAIMS]
     return [it for it in items if it["injected"]]

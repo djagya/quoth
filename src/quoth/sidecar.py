@@ -278,7 +278,8 @@ class Quoth:
                "quote_verification": self.state_db is not None,
                "episodes": self._lane_health(self.assistant_lane),
                "owner_episodes": self._lane_health(self.owner_lane),
-               "relevance_gate": self.gate.status()}
+               "relevance_gate": self.gate.status(), "retrieval": self.retrieval,
+               "live_check": getattr(self.evidence, "live", None) is not None}
         if self.reranker is not None:
             out["reranker"] = self.reranker.status()
         return out

@@ -3,6 +3,12 @@
 A turn is one ``prefetch`` record. A turn counts as a probable miss when the same
 session (hash) calls a search tool (``evidence_bundle`` or ``episode_search``) after it
 and before its next prefetch: the assistant went looking for something recall did not give it.
+
+``explicit_join`` joins each ``evidence_bundle`` call to its session's last prefetch before
+it, note by note (a locator's path): did the search return a note the turn injected, one it
+had pooled (judged) but not injected, or one it never pooled? ``late`` reads the follow-up
+records of `slow` turns: when the late search finished, and whether what it would have
+injected shows up in the session's next explicit search.
 """
 from __future__ import annotations
 
@@ -17,6 +23,9 @@ from .metrics import latency, percentile
 
 SCHEMA = "quoth-eval-online/v1"
 SEARCH_TOOLS = ("evidence_bundle", "episode_search")
+RECORD_TYPES = ("prefetch", "tool", "skip", "late")
+# Evidence budgets (seconds) a late-tail readout reports: how many late turns would have made it.
+LATE_BUDGETS = (2.0, 2.5, 2.8)
 
 
 def read_logs(directory: str | Path, days: int | None = None, today=None) -> tuple[list[dict], dict]:
@@ -35,7 +44,7 @@ def read_logs(directory: str | Path, days: int | None = None, today=None) -> tup
                 except json.JSONDecodeError:
                     bad += 1
                     continue
-                if isinstance(rec, dict) and rec.get("type") in ("prefetch", "tool", "skip"):
+                if isinstance(rec, dict) and rec.get("type") in RECORD_TYPES:
                     records.append(rec)
                 else:
                     bad += 1
@@ -100,6 +109,8 @@ def summarize(records: list[dict]) -> dict:
     return {
         "schema": SCHEMA,
         "turns": n,
+        "explicit_join": explicit_join(by_session),
+        "late": late_tail(records, by_session),
         "skipped_not_authored": skipped,
         "sessions": len({t.get("session") for t in turns if t.get("session")}),
         "versions": dict(Counter(str(r.get("v")) for r in turns)),
@@ -120,3 +131,96 @@ def summarize(records: list[dict]) -> dict:
 def online(directory: str | Path, days: int | None = None) -> dict:
     records, files = read_logs(directory, days)
     return {**summarize(records), "window": {"days": days, **files}}
+
+
+def _note(locator) -> str | None:
+    """A locator's note path ("a/b.md:3-9" -> "a/b.md")."""
+    if not isinstance(locator, str) or ":" not in locator:
+        return None
+    return locator.rsplit(":", 1)[0]
+
+
+def _turn_notes(turn: dict) -> dict[str, set]:
+    vault = (turn.get("stores") or {}).get("vault") or []
+    notes = {"injected": set(), "passed": set(), "pooled": set(), "candidates": set()}
+    for item in vault:
+        note = _note(item.get("locator"))
+        if note is None:
+            continue
+        notes["candidates"].add(note)
+        if item.get("pool"):
+            notes["pooled"].add(note)
+        if item.get("passed"):
+            notes["passed"].add(note)
+        if item.get("injected"):
+            notes["injected"].add(note)
+    return notes
+
+
+def explicit_join(by_session: dict) -> dict:
+    """Per `evidence_bundle` call after a prefetch in its session: how its result notes
+    relate to that turn's vault candidates (rates over the joined calls)."""
+    calls = 0
+    flags = Counter()
+    notes = Counter()
+    for events in by_session.values():
+        last = None
+        for rec in events:
+            if rec.get("type") == "prefetch":
+                last = _turn_notes(rec)
+                continue
+            if rec.get("type") != "tool" or rec.get("tool") != "evidence_bundle" or last is None:
+                continue
+            calls += 1
+            seen = {n for n in (_note(x) for x in rec.get("results") or []) if n is not None}
+            kinds = set()
+            for note in seen:
+                if note in last["injected"]:
+                    kind = "injected"
+                elif note in last["passed"]:
+                    kind = "passed_not_injected"
+                elif note in last["pooled"]:
+                    kind = "pooled_not_passed"
+                elif note in last["candidates"]:
+                    kind = "candidate_not_pooled"
+                else:
+                    kind = "never_candidate"
+                notes[kind] += 1
+                kinds.add(kind)
+            for kind in kinds:
+                flags[kind] += 1
+            if kinds & {"passed_not_injected", "pooled_not_passed"}:
+                flags["pooled_not_injected"] += 1
+            if kinds & {"candidate_not_pooled", "never_candidate"}:
+                flags["never_pooled"] += 1
+    kinds = ("injected", "passed_not_injected", "pooled_not_passed", "candidate_not_pooled",
+             "never_candidate", "pooled_not_injected", "never_pooled")
+    return {"calls": calls,
+            "rate": {k: (round(flags[k] / calls, 4) if calls else None) for k in kinds},
+            "notes": {k: notes[k] for k in kinds[:5]}}
+
+
+def late_tail(records: list[dict], by_session: dict) -> dict:
+    """The `late` follow-ups of slow turns: completion times, how many would fit a larger
+    budget, and how often their would-be injection reappears in the next explicit search."""
+    late = [r for r in records if r.get("type") == "late"]
+    done = [r["completed_ms"] for r in late if isinstance(r.get("completed_ms"), (int, float))]
+    joined = matched = 0
+    for events in by_session.values():
+        for i, rec in enumerate(events):
+            if rec.get("type") != "late":
+                continue
+            wanted = {n for n in (_note(x) for x in rec.get("would_inject") or []) if n}
+            for nxt in events[i + 1:]:
+                if nxt.get("type") == "prefetch":
+                    break
+                if nxt.get("type") == "tool" and nxt.get("tool") == "evidence_bundle":
+                    joined += 1
+                    got = {n for n in (_note(x) for x in nxt.get("results") or []) if n}
+                    matched += bool(wanted & got)
+                    break
+    return {"records": len(late), "completed_ms": _dist(done),
+            "within": {f"{b:g}s": (round(sum(ms <= b * 1000 for ms in done) / len(done), 4) if done else None)
+                       for b in LATE_BUDGETS},
+            "followed_by_search": joined,
+            "search_returned_late_note_rate": round(matched / joined, 4) if joined else None}

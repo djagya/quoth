@@ -169,7 +169,9 @@ def built(tmp_path_factory):
 def run(built):
     # No gate (hash-ngram cosines sit under the bge-m3 serving floor): the sweep's baseline.
     from quoth.relevance import Gate
-    target = InProcessTarget.build(**built["paths"], model=built["model"], episodes_prefetch=True, gate=Gate())
+    # Dense ranking: the parity oracles below are the dense v0.11.0 evaluator.
+    target = InProcessTarget.build(**built["paths"], model=built["model"], episodes_prefetch=True, gate=Gate(),
+                                   retrieval="dense")
     try:
         receipt, detail = run_set(load_set(SET), target, gold_drift=True, detail=True)
     finally:
@@ -323,7 +325,7 @@ def test_sweep_replay_matches_a_live_gated_run(built, run):
     receipt, _ = run
     replayed, _ = evaluate(receipt.data["candidates"]["rows"], Gate.from_dict(GATE))
     target = InProcessTarget.build(**built["paths"], model=built["model"], episodes_prefetch=True,
-                                   gate=Gate.from_dict(GATE))
+                                   gate=Gate.from_dict(GATE), retrieval="dense")
     try:
         gated, _ = run_set(load_set(SET), target, gold_drift=True)
     finally:
@@ -428,7 +430,7 @@ def test_parity_with_gate_metrics_on_legacy_golden(tmp_path, monkeypatch):
     convert("golden-v1", REPO / "eval" / "golden.jsonl", tmp_path / "golden.jsonl", privacy="public",
             fixture="tests/conftest.py", origin="synthetic")
     evalset = load_set(tmp_path / "golden.jsonl")
-    target = InProcessTarget.build(db=db, ledger=tmp_path / "ledger.db", model="hash-ngram")
+    target = InProcessTarget.build(db=db, ledger=tmp_path / "ledger.db", model="hash-ngram", retrieval="dense")
     try:
         receipt, _ = run_set(evalset, target)
     finally:

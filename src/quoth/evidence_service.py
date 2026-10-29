@@ -109,8 +109,10 @@ class ReadOnlyEvidence:
         # reload a large model on every call.
         embedder = self.queries.embedder(model)
         qvec = self.queries.vector(model, embedder, query, cache=cache_query)
+        # Prefetch keeps the plain ranking as its candidate pool: its per-note cap applies to the
+        # served slots (`relevance.vault_pick`), so evals and the nightly gate see every candidate.
         ranked = retrieve(st, model, qvec, query, k, mode=self.retrieval, filt=filt,
-                          per_note=D.MAX_HITS_PER_NOTE[purpose])
+                          per_note=D.MAX_HITS_PER_NOTE[purpose] if purpose == "explicit" else None)
         hits = self._rows(conn, st, [r["chunk_id"] for r in ranked])
         if with_scores:
             for hit, r in zip(hits, ranked):

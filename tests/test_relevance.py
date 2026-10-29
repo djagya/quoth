@@ -349,8 +349,9 @@ def test_record_keeps_signals_and_counts_words_on_the_injected_excerpt():
                         "text": "Rent. " + tail}]}
     rec = SW.record(row, cands, row["expect"]["sources"])
     a, b = rec["stores"]["vault"]["items"]
-    assert a == {"score": 0.7, "pool": True, "injected": True, "lexical": 1.0, "matched": 3, "match": [0]}
-    assert b == {"score": 0.5, "pool": True, "injected": False, "lexical": 0.0}
+    assert a == {"score": 0.7, "pool": True, "injected": True, "lexical": 1.0, "matched": 3, "match": [0],
+                 "note": 0}
+    assert b == {"score": 0.5, "pool": True, "injected": False, "lexical": 0.0, "note": 1}
     assert "text" not in json.dumps(rec) and "a.md" not in json.dumps(rec)
 
 

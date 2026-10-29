@@ -158,6 +158,9 @@ def decide(a, b, mode, changes):
 @pytest.mark.parametrize("scenario", sorted(SCENARIOS))
 def test_old_and_new_gate_decisions_agree_on_the_public_fixture(scenario, base, tmp_path, monkeypatch):
     current, base_vault = base
+    # The frozen oracle ranks densely: score the harness in dense mode too.
+    from quoth import recall_defaults
+    monkeypatch.setattr(recall_defaults, "RETRIEVAL", "dense")
     vault = tmp_path / "vault"
     shutil.copytree(base_vault, vault)
     # The candidate is the current snapshot's successor; the current one keeps its own vault.

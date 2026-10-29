@@ -16,6 +16,8 @@ from .format import EvalSetError
 
 PRIVATE_WARNING = ("warning: --detail-out holds per-row ids, locators and vault paths of this set; "
                    "it is private data: keep it on this machine, never commit or share it")
+TRACE_WARNING = ("warning: --trace-out holds every question, recall block and excerpt of this run; "
+                 "it is private data: keep it on this machine, never commit or share it")
 
 
 def _print(obj) -> None:
@@ -51,8 +53,8 @@ def _target(a):
     gate = relevance.from_args(a)
     reranker = rerank.from_args(a, gate)
     if a.socket:
-        if gate != relevance.default_gate() or reranker is not None:
-            raise RunError("gate and rerank flags apply in-process only; a live sidecar uses its own"
+        if gate != relevance.default_gate() or reranker is not None or a.retrieval != D.RETRIEVAL or a.vault:
+            raise RunError("gate, rerank, retrieval and vault flags apply in-process only; a live sidecar uses its own"
                            " (see /v1/health)")
         target = SocketTarget(a.socket, evidence_budget=30.0 if a.evidence_budget is None else a.evidence_budget)
         target.db = a.db  # read-only, only for --gold-drift against the served snapshot
@@ -73,7 +75,7 @@ def _target(a):
         owner_episodes=a.owner_episodes, model=a.model, evidence_budget=a.evidence_budget,
         episodes_prefetch=a.episodes_prefetch == "on", owner_prefetch=a.owner_prefetch == "on",
         assistant_min_score=a.assistant_min_score, owner_min_score=a.owner_min_score, gate=gate,
-        reranker=reranker)
+        reranker=reranker, retrieval=a.retrieval, vault=a.vault)
 
 
 def _cmd_run(a) -> int:
@@ -89,9 +91,10 @@ def _cmd_run(a) -> int:
     except (RunError, OSError, ValueError, RuntimeError) as exc:
         _err(f"cannot build target: {type(exc).__name__}: {exc}")
         return 2
+    trace = [] if a.trace_out else None
     try:
         receipt, detail = run_set(evalset, target, k_candidates=a.k_candidates,
-                                  gold_drift=a.gold_drift, detail=bool(a.detail_out))
+                                  gold_drift=a.gold_drift, detail=bool(a.detail_out), trace=trace)
     except RunError as exc:
         _err(str(exc))
         return 2
@@ -104,6 +107,12 @@ def _cmd_run(a) -> int:
         out = Path(a.detail_out)
         out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in detail), encoding="utf-8")
         out.chmod(0o600)
+    if a.trace_out:
+        print(TRACE_WARNING, file=sys.stderr)
+        out = Path(a.trace_out)
+        out.touch(mode=0o600)
+        out.chmod(0o600)
+        out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in trace), encoding="utf-8")
     if not a.quiet:
         print(receipt.to_json(), end="")
     return 3 if receipt.status != "ok" else 0
@@ -219,6 +228,12 @@ def main(argv=None) -> int:
                     help="resolve expected vault paths against the snapshot (nightly gate rules)")
     pr.add_argument("--out", help="write the receipt here")
     pr.add_argument("--detail-out", help="PRIVATE per-row ids/locators/scores (local only)")
+    pr.add_argument("--trace-out", help="PRIVATE JSONL per row: query, exact recall block, explicit hits"
+                                        " with text (caller tests; local only)")
+    pr.add_argument("--retrieval", choices=D.RETRIEVAL_MODES, default=D.RETRIEVAL,
+                    help=f"vault ranking, as the sidecar's --retrieval (default {D.RETRIEVAL})")
+    pr.add_argument("--vault", help="live vault root: per-hit freshness (live) in explicit hits, as the"
+                                    " sidecar's --vault")
     pr.add_argument("--quiet", action="store_true", help="do not print the receipt")
     from .. import relevance, rerank
     relevance.add_arguments(pr)
