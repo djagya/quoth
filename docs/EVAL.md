@@ -265,8 +265,8 @@ The files come from the `onnx-community/bge-reranker-v2-m3-ONNX` export, pinned 
 to load (`reranker.status: unavailable`). Nothing downloads unless asked:
 
 ```sh
-quoth rerank check --download           # fetch once, load, score 3 public pairs, print timings
-quoth rerank check                      # verify and time only
+quoth models fetch --no-embedder --reranker bge-reranker-v2-m3-int8   # fetch once, verified
+quoth rerank check                      # verify, load, score 3 public pairs, print timings
 ```
 
 It prints the load time and the latency of 3 pairs, short (`ms_3_pairs`) and filled to the

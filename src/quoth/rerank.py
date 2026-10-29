@@ -10,8 +10,8 @@ export of it, so the ONNX files come from the onnx-community export (Hugging Fac
 transformers.js org) pinned at one revision. ``bge-reranker-v2-m3-int8`` (default, 571 MB)
 is its dynamically quantised graph; ``bge-reranker-v2-m3`` the fp32 graph (2.27 GB).
 Files live under ``<cache>/<repo>/`` with the embedder's cache (``QUOTH_MODEL_CACHE``, else
-``$QUOTH_HOME/models``) and are fetched only with ``allow_download`` (`quoth rerank check
---download`). ``hash-rerank`` is a deterministic, non-semantic stand-in for tests.
+``$QUOTH_HOME/models``) and are fetched only by `quoth models fetch --reranker NAME`.
+``hash-rerank`` is a deterministic, non-semantic stand-in for tests.
 
 Nothing here is part of the index contract: no score is stored in a snapshot.
 `RerankService` loads the model off the request path and scores on the sidecar's evidence
@@ -141,7 +141,7 @@ class OnnxReranker:
     """One ONNX cross-encoder session (CPU); one pair per run, so a deadline stops between pairs."""
 
     def __init__(self, spec: RerankSpec, cache_dir: str | None = None, threads: int | None = None,
-                 allow_download: bool = False, max_tokens: int = MAX_TOKENS):
+                 max_tokens: int = MAX_TOKENS):
         try:
             import onnxruntime as ort  # type: ignore[import-not-found]
             from tokenizers import Tokenizer  # type: ignore[import-not-found]
@@ -149,11 +149,9 @@ class OnnxReranker:
             raise RerankerUnavailable("onnxruntime/tokenizers are not installed; install the 'dense' extra") from e
         self.model_dir = model_dir(spec, cache_dir)
         path = os.path.join(self.model_dir, spec.onnx_file)
-        if allow_download and not all(os.path.exists(os.path.join(self.model_dir, f)) for f in spec.files):
-            download(spec, cache_dir)
         if not os.path.exists(path):
             raise RerankerUnavailable(f"{spec.name} ONNX files not found under {self.model_dir};"
-                                      " run `quoth rerank check --download` once to fetch them")
+                                      f" run `quoth models fetch --no-embedder --reranker {spec.name}` first")
         verify(spec, self.model_dir)  # seconds for 0.6-2.3 GB: callers load off the request path
         so = ort.SessionOptions()
         so.intra_op_num_threads = threads or (os.cpu_count() or 4)
@@ -196,18 +194,6 @@ def _score_each(logit, query: str, texts: list[str], deadline: float | None) -> 
 def model_dir(spec: RerankSpec, cache_dir: str | None = None) -> str:
     root = cache_dir or str(paths.model_cache())
     return os.path.join(root, spec.repo)
-
-
-def download(spec: RerankSpec, cache_dir: str | None = None) -> str:
-    """Fetch the spec's files at its pinned revision (explicit operator step only)."""
-    try:
-        from huggingface_hub import snapshot_download
-    except ImportError as e:  # pragma: no cover - depends on host
-        raise RerankerUnavailable("huggingface_hub is not installed") from e
-    target = model_dir(spec, cache_dir)
-    snapshot_download(repo_id=spec.repo, revision=spec.revision, local_dir=target, allow_patterns=spec.files)
-    verify(spec, target)
-    return target
 
 
 def score_pairs(model, query: str, texts: list[str], deadline: float | None = None,
@@ -351,15 +337,14 @@ CHECK_PASSAGES = (
 )
 
 
-def check(name: str, *, download_files: bool = False, cache_dir: str | None = None,
+def check(name: str, *, cache_dir: str | None = None,
           max_tokens: int = MAX_TOKENS, repeats: int = 5) -> dict:
-    """Load the model (fetching it first if asked), score 3 public pairs, time them."""
+    """Load the model, score 3 public pairs, time them."""
     from .cpu import embed_threads
     spec = MODELS[name]
     threads = embed_threads()
     t0 = time.monotonic()
-    model = get_reranker(name, cache_dir=cache_dir, threads=threads, allow_download=download_files,
-                         max_tokens=max_tokens) if spec.backend == "onnx" else get_reranker(name)
+    model = get_reranker(name, cache_dir=cache_dir, threads=threads, max_tokens=max_tokens) if spec.backend == "onnx" else get_reranker(name)
     load_s = round(time.monotonic() - t0, 2)
     scores = model.score(CHECK_QUERY, list(CHECK_PASSAGES))
 
@@ -387,13 +372,11 @@ def main(argv=None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     pc = sub.add_parser("check", help="load the reranker, score 3 public pairs, report latency")
     pc.add_argument("--model", choices=sorted(MODELS), default=DEFAULT_MODEL)
-    pc.add_argument("--download", action="store_true",
-                    help=f"fetch missing files from {REPO}@{REVISION[:12]} first")
     pc.add_argument("--cache-dir", default=None, help="model root (default $QUOTH_MODEL_CACHE, else $QUOTH_HOME/models)")
     pc.add_argument("--max-tokens", type=int, default=MAX_TOKENS)
     a = p.parse_args(argv)
     try:
-        out = check(a.model, download_files=a.download, cache_dir=a.cache_dir, max_tokens=a.max_tokens)
+        out = check(a.model, cache_dir=a.cache_dir, max_tokens=a.max_tokens)
     except (RerankerUnavailable, OSError) as e:
         print(f"quoth rerank: {e}", file=sys.stderr)
         return 2

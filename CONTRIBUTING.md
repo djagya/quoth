@@ -11,7 +11,9 @@ uv run pytest -q
 ```
 
 Python 3.13+ and [`uv`](https://docs.astral.sh/uv/) are required. Tests use the synthetic
-`hash-ngram` embedder, so no model files are needed. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+`hash-ngram` embedder, so no model files are needed. Tests that need the real models
+skip without them; run the full suite with real models in Docker (README: "Real models in
+Docker"). [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 explains how the pieces fit together.
 
 ## Before you open a pull request

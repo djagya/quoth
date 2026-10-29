@@ -76,14 +76,14 @@ uv run quoth eval run eval/public/set.jsonl \
 
 Dense retrieval needs the `dense` extra and the BGE-M3 ONNX files pinned in
 `eval/models-manifest.json`, under `$QUOTH_MODEL_CACHE/BAAI/bge-m3/`. quoth never downloads
-them itself; fetch them once (about 2.3 GB), for example with the Hugging Face CLI:
+a model while it runs; fetch the files once (about 2.3 GB, every file checked against its
+pinned SHA-256):
 
 ```bash
 uv sync --extra dense
-uv run hf download BAAI/bge-m3 --revision 5617a9f61b028005a4858fdac845db406aefb181 \
-  --local-dir "${QUOTH_MODEL_CACHE:-$HOME/.local/share/quoth/models}/BAAI/bge-m3" \
-  config.json sentencepiece.bpe.model tokenizer.json tokenizer_config.json \
-  onnx/model.onnx onnx/model.onnx_data
+uv run quoth models fetch                                   # the BGE-M3 embedder
+uv run quoth models fetch --reranker bge-reranker-v2-m3-int8  # optional: the prefetch reranker
+uv run quoth models verify                                  # check what is in the cache
 ```
 
 ```bash
@@ -239,6 +239,21 @@ runs the installed `quoth` console script in a subprocess:
 
 ```bash
 PATH="$PWD/.venv/bin:$PATH" PYTHONPATH=src .venv/bin/python -m pytest -q
+```
+
+### Real models in Docker
+
+The test image runs everything that needs ONNX Runtime and the real models (BGE-M3, the
+reranker) without installing either on your machine. Models and state live in Docker
+volumes; only a vault you point it at is mounted, read-only:
+
+```bash
+docker compose build
+docker compose run --rm quoth models fetch --reranker bge-reranker-v2-m3-int8   # once, ~2.9 GB
+docker compose run --rm --entrypoint python quoth -m pytest -q                  # full suite, real models
+docker compose run --rm quoth eval fixture --out /data/fixture --model bge-m3
+docker compose run --rm quoth eval run eval/public/set.jsonl --fixture-dir /data/fixture --out /data/run.json
+QUOTH_VAULT=/path/to/vault docker compose run --rm quoth snapshot --vault /vault --target /data/snapshots/first.db
 ```
 
 Everything in `eval/` is **synthetic** and safe to publish. The repository holds no personal

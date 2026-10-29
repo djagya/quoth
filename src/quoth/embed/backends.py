@@ -99,10 +99,10 @@ class HashEmbedder:
 
 
 class FastEmbedder:
-    """fastembed TextEmbedding (ONNX Runtime, CPU). Imported lazily; never downloads by default."""
+    """fastembed TextEmbedding (ONNX Runtime, CPU). Imported lazily; local files only."""
 
     def __init__(self, spec: ModelSpec, cache_dir: str | None = None, threads: int | None = None,
-                 allow_download: bool = False, batch_size: int = 32):
+                 batch_size: int = 32):
         try:
             from fastembed import TextEmbedding  # type: ignore[import-not-found]
         except ImportError as e:  # pragma: no cover - depends on the install
@@ -114,9 +114,7 @@ class FastEmbedder:
             raise EmbedderUnavailable(
                 f"{spec.source_id} is not supported by the installed fastembed version")
         kw: dict = {"model_name": spec.source_id, "threads": threads,
-                    "cache_dir": str(cache_dir or paths.model_cache())}
-        if not allow_download:
-            kw["local_files_only"] = True
+                    "cache_dir": str(cache_dir or paths.model_cache()), "local_files_only": True}
         try:
             self._m = TextEmbedding(**{k: v for k, v in kw.items() if v is not None})
         except Exception as e:  # pragma: no cover - depends on the install
@@ -137,12 +135,12 @@ class FastEmbedder:
 class OnnxEmbedder:
     """Official ONNX export of a HF model via onnxruntime, CLS pooling + L2 norm.
 
-    Files live under cache_dir/<repo>/ (downloaded once with huggingface_hub when
-    allow_download; otherwise loaded from the local snapshot only).
+    Files live under cache_dir/<repo>/ and are loaded from there only; `quoth models fetch`
+    downloads and verifies them.
     """
 
     def __init__(self, spec: ModelSpec, cache_dir: str | None = None, threads: int | None = None,
-                 allow_download: bool = False, batch_size: int = 32):
+                 batch_size: int = 32):
         try:
             import onnxruntime as ort  # type: ignore[import-not-found]
         except ImportError as e:  # pragma: no cover - depends on the install
@@ -152,19 +150,10 @@ class OnnxEmbedder:
         root = str(cache_dir or paths.model_cache())
         model_dir = os.path.join(root, spec.source_id)
         model_path = os.path.join(model_dir, "onnx", "model.onnx")
-        if allow_download and not os.path.exists(model_path):
-            try:
-                from huggingface_hub import snapshot_download
-            except ImportError as e:  # pragma: no cover - depends on the install
-                raise EmbedderUnavailable("huggingface_hub is not installed") from e
-            snapshot_download(repo_id=spec.source_id, local_dir=model_dir,
-                              allow_patterns=["onnx/model.onnx", "onnx/model.onnx_data",
-                                              "tokenizer.json", "tokenizer_config.json",
-                                              "sentencepiece.bpe.model", "config.json"])
         if not os.path.exists(model_path):
             raise EmbedderUnavailable(
                 f"{spec.source_id} ONNX files not found under {model_dir};"
-                " download them first (see README: Quick start)")
+                " run `quoth models fetch` first")
         so = ort.SessionOptions()
         so.intra_op_num_threads = threads or (os.cpu_count() or 4)
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL

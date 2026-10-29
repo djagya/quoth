@@ -46,7 +46,7 @@ def build_snapshot(vault: Path, target: Path, model: str = DEFAULT_MODEL) -> Pat
         stats = ingest_vault(conn, vault)
         if stats.errors:
             raise RuntimeError("fixture vault ingest failed")
-        embed_chunks(conn, get_embedder(model, allow_download=False), batch_size=16)
+        embed_chunks(conn, get_embedder(model), batch_size=16)
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute("PRAGMA journal_mode=DELETE")
     finally:

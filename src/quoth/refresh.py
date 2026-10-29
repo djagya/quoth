@@ -251,7 +251,7 @@ def _build_and_freeze(target: Path, vault: Path, output_manifest: Path, checkpoi
                 if stats.errors:
                     raise ValueError(f"vault ingest errors: {stats.errors}")
                 if embedder is None:
-                    embedder = get_embedder("bge-m3", threads=threads, allow_download=False)
+                    embedder = get_embedder("bge-m3", threads=threads)
                 if embedder.spec.name != "bge-m3" or embedder.spec.dim != 1024:
                     raise ValueError("requires bge-m3 embedder")
                 embed_stats = embed_chunks(conn, embedder, batch_size=batch_size)

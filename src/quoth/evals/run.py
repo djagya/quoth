@@ -112,7 +112,7 @@ class InProcessTarget:
             pass
         reranker = self.app.reranker
         if reranker is not None and reranker.wait() != "ready":
-            raise RunError(f"reranker {reranker.name} {reranker.state}; fetch it with `quoth rerank check --download`")
+            raise RunError(f"reranker {reranker.name} {reranker.state}; fetch it with `quoth models fetch --no-embedder --reranker {reranker.name}`")
 
     def prefetch(self, body: dict) -> dict:
         out = self.app.prefetch(body)

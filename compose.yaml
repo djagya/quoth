@@ -1,0 +1,21 @@
+# Local test and evaluation container. Everything stays inside Docker: the model cache is
+# the quoth-models volume (filled once with `quoth models fetch`), state (snapshots, ledger,
+# eval receipts) is the quoth-data volume. Only the vault is mounted from the host, read-only.
+#   docker compose build
+#   docker compose run --rm quoth models fetch --reranker bge-reranker-v2-m3-int8
+#   docker compose run --rm quoth eval fixture --out /data/fixture --model bge-m3
+#   docker compose run --rm quoth eval run eval/public/set.jsonl --fixture-dir /data/fixture --out /data/run.json
+#   QUOTH_VAULT=/path/to/vault docker compose run --rm quoth snapshot --vault /vault --target /data/snapshots/first.db
+#   docker compose run --rm --entrypoint python quoth -m pytest -q
+services:
+  quoth:
+    build: .
+    image: quoth:dev
+    volumes:
+      - quoth-models:/models
+      - quoth-data:/data
+      - ${QUOTH_VAULT:-./eval/public/vault}:/vault:ro
+
+volumes:
+  quoth-models:
+  quoth-data:

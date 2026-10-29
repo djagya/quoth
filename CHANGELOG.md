@@ -43,6 +43,9 @@ This release ships:
   `quoth.evals`), plus a public synthetic fixture.
 - **Operations**: `quoth health` for host monitors, deployment templates in `deploy/`, and a
   CI workflow with hash-locked wheel installs, a security job and a gated release guard.
+- **Models**: `quoth models fetch` downloads the pinned BGE-M3 and reranker files and keeps
+  each only if its SHA-256 matches; nothing downloads at run time. A Docker image
+  (`compose.yaml`) runs the real-model tests and evals with models in a volume.
 
 Snapshots and evidence databases built by earlier development versions do not open with this
 release (new schema, chunker and embedder input). Rebuild them with `quoth snapshot`; the
