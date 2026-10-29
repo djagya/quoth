@@ -23,6 +23,8 @@ RUN_AS=hermes                            # user the gateway shares the socket wi
 S6_SETUIDGID=s6-setuidgid                # full path if it is not on PATH
 EPISODES_INTERVAL=300                    # seconds between lane ticks
 EPISODES_TICK_SECONDS=60                 # CPU budget per lane tick (lanes take turns)
+PREFETCH_LOG=$QUOTH_HOME/prefetch-log     # record-only turn log: hashes, locators, scores; no text
+PREFETCH_LOG_DAYS=30                     # prune prefetch log files older than this
 # ------------------------------------------------------------------------------
 
 VENV=$QUOTH_PREFIX/quoth-current
@@ -36,10 +38,11 @@ rotate_log() {
   fi
 }
 
-mkdir -p "$QUOTH_HOME/core" "$(dirname "$LOG")"
+mkdir -p "$QUOTH_HOME/core" "$PREFETCH_LOG" "$(dirname "$LOG")"
 rotate_log
 touch "$LOG"
-chown "$RUN_AS:$RUN_AS" "$QUOTH_HOME/core" "$LOG"
+chown "$RUN_AS:$RUN_AS" "$QUOTH_HOME/core" "$PREFETCH_LOG" "$LOG"
+chmod 0700 "$PREFETCH_LOG"
 exec >>"$LOG" 2>&1
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] starting quoth sidecar ($(readlink "$VENV" || echo "$VENV"))"
@@ -54,4 +57,6 @@ exec "$S6_SETUIDGID" "$RUN_AS" "$VENV/bin/quoth" sidecar \
   --episodes "$QUOTH_HOME/episodes.db" \
   --owner-episodes "$QUOTH_HOME/owner-episodes.db" \
   --episodes-interval "$EPISODES_INTERVAL" \
-  --episodes-tick-seconds "$EPISODES_TICK_SECONDS"
+  --episodes-tick-seconds "$EPISODES_TICK_SECONDS" \
+  --prefetch-log "$PREFETCH_LOG" \
+  --prefetch-log-days "$PREFETCH_LOG_DAYS"

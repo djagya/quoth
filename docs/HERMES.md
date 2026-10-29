@@ -64,7 +64,10 @@ process; if another sidecar is listening on the socket it exits.
    else `~/.local/share/quoth` (the sidecar's own default).
 
 While the socket is missing, the plugin reports itself unavailable and Hermes falls back to
-its built-in memory.
+its built-in memory. If the sidecar does not answer when a session starts, the session's core
+block starts empty and the plugin refetches it on the next prefetch or system prompt, at most
+once a minute, until it has one. The recall status count is the claims, vault excerpts and
+both lanes' excerpts injected in the turn.
 
 ### Plugin configuration (`$HERMES_HOME/quoth.json`)
 
@@ -201,7 +204,8 @@ Paths default under `$QUOTH_HOME`; the Hermes `state.db` under `$HERMES_HOME`.
 | `--mode OCTAL` | `660` | socket permission bits (the access control) |
 | `--ledger PATH` | `$QUOTH_HOME/ledger.db` | the claim ledger (created and migrated if missing) |
 | `--state-db PATH` | `$HERMES_HOME/state.db` | Hermes chat history, read-only; `''` disables quote checks and owner-authored claims |
-| `--db PATH` | off | serving snapshot or pointer; omit to run without vault evidence |
+| `--db PATH` | off | serving snapshot or pointer; omit to run without vault evidence. A pointer is watched and admitted in the background ([snapshot admission](#snapshot-admission)) |
+| `--snapshot-watch-interval S` | 5 | seconds between checks of the `--db` pointer |
 | `--core-dir DIR` | off | published core directory (`core.md`); without it `/v1/core` compiles live |
 | `--model NAME` | `bge-m3` | query embedder |
 | `--no-warm` | off | skip the background model warm-up |
@@ -215,7 +219,7 @@ Paths default under `$QUOTH_HOME`; the Hermes `state.db` under `$HERMES_HOME`.
 | `--owner-min-score X` | 0.62 | cosine floor for owner-lane excerpts |
 | `--episodes-interval S` | 300 | seconds between background lane ticks |
 | `--episodes-tick-seconds S` | 60 | CPU budget of one lane tick |
-| `--prefetch-log DIR` | off | privacy-safe JSON line per turn and per search tool call ([EVAL.md](EVAL.md#online-measurement-the-prefetch-log)) |
+| `--prefetch-log DIR` | off | record-only JSON line per turn and per search tool call: hashes, ids, locators, scores and timings, never the query or excerpt text ([EVAL.md](EVAL.md#online-measurement-the-prefetch-log)); on in the [s6 template](../deploy/s6/quoth-sidecar/run) under `$QUOTH_HOME/prefetch-log` |
 | `--prefetch-log-days N` | 30 | prune log files older than N days |
 | `--vault-min-cosine`, `--vault-max-gap`, `--vault-lexical-rescue`, `--claims-min-cosine`, `--claims-min-lexical` | off | relevance gate |
 | `--rerank-model`, `--rerank-budget`, `--rerank-claims`, `--rerank-max-tokens`, `--vault-min-rerank`, `--vault-max-rerank-gap`, `--vault-rerank-widen`, `--claims-min-rerank` | off | cross-encoder reranker |
@@ -253,7 +257,7 @@ a stable code that never contains paths or content.
 | 409 | another review assist is running | `assist_busy` |
 | 413 | body over 64 KiB | `body_too_large` |
 | 500 | unexpected failure (logged without content) | `internal` |
-| 503 | a component is not configured, or `/v1/health` cannot open the snapshot | `state_db_unconfigured`, `evidence_unconfigured`, `episodes_unconfigured`, `ledger_unavailable`, `assist_unavailable`, `unhealthy` |
+| 503 | a component is not configured, no snapshot is admitted yet, or `/v1/health` has no snapshot to serve | `state_db_unconfigured`, `evidence_unconfigured`, `evidence_unavailable`, `episodes_unconfigured`, `ledger_unavailable`, `assist_unavailable`, `unhealthy` |
 
 Integer fields are clamped to their range (`max(lo, min(n, hi))`); for example `limit` is
 1–50. `Content-Length` is checked before the body is read, and after a 400
@@ -265,7 +269,8 @@ Integer fields are clamped to their range (`max(lo, min(n, hi))`); for example `
 {"ok": true, "schema": "quoth-sidecar/v1", "version": "0.15.0", "status": "green",
  "ledger": {"status": "green", "reasons": [], "pending": 2, "accepted_current": 10,
             "oldest_pending_age_days": 0.0},
- "evidence": {"status": "ok", "snapshot_id": "<sha256>"},
+ "evidence": {"status": "ok", "state": "admitted", "snapshot_id": "<sha256>", "pointer": true,
+              "watcher": {"interval_s": 5.0, "last_poll_age_s": 1.2}},
  "quote_verification": true,
  "episodes": {"status": "green", "reasons": [], "messages": 4, "embedded": 4, "pending": 0,
               "newest": "…", "last_tick_at": "…", "prefetch": false},
@@ -274,11 +279,56 @@ Integer fields are clamped to their range (`max(lo, min(n, hi))`); for example `
 ```
 
 `status` is `red` when the ledger queue is red (more than 40 pending, or the oldest older
-than 14 days) or the snapshot cannot be opened. Only an unavailable snapshot answers **503**
-(`"ok": false, "error": "unhealthy"` plus the same fields), so a monitor's status-code alarm
-means "cannot serve evidence"; a review backlog stays 200 with `status: red` in the body. `evidence.status` is `ok`, `unavailable` or `disabled`; a lane
-block is `{"status": "disabled"}` when the lane is off; `reranker` appears only with
-`--rerank-model`.
+than 14 days) or `evidence.status` is anything but `ok` or `disabled`. Only an unavailable
+snapshot answers **503** (`"ok": false, "error": "unhealthy"` plus the same fields), so a
+monitor's status-code alarm means "cannot serve evidence"; a review backlog, or a rejected
+pointer while the previous snapshot still serves, stays 200 with `status: red` in the body.
+
+`evidence.status` is one of:
+
+| Status | Meaning | HTTP |
+|---|---|---|
+| `ok` | the pointer's target is admitted and served (a young `candidate` may be validating) | 200 |
+| `pointer_rejected` | the pointer names a target that failed validation; the previous snapshot still serves | 200, red |
+| `candidate_stalled` | a candidate has been validating or warming for over an hour | 200, red |
+| `watcher_stalled` | the pointer watcher has not polled for ten intervals (at least 60 s) | 200, red |
+| `unavailable` | no snapshot is admitted (a bad pointer at startup); prefetch is claims-only | 503 |
+| `disabled` | the sidecar runs without `--db` | 200 |
+
+`evidence.rejected` (when present) is `{target_digest, reason, since, attempts, retry_in_s}`:
+a 16-hex digest of the target, never its path, and a reason class (`pointer_not_symlink`,
+`target_missing`, `manifest_invalid`, `validation_failed`, `warmup_failed`, `io_error`).
+`evidence.candidate` is `{since, age_s}`. A lane block is `{"status": "disabled"}` when the
+lane is off. `reranker` appears only with `--rerank-model`: `status` is `loading`, `ready` or
+`unavailable`, plus `attempts` and `retry_in_s` (the next load attempt while unavailable).
+`quoth health` turns the `quoth/sidecar` row FAIL for any evidence status but `ok` (naming the
+reason class and digest) and WARN while the reranker is unavailable.
+
+### Snapshot admission
+
+With `--db` naming a pointer (a symlink, as `quoth refresh-nightly` maintains), the snapshot
+served is admitted by a watcher thread, never inside a request:
+
+- Every `--snapshot-watch-interval` seconds the watcher reads what the pointer names: the
+  target path, its file identity (device, inode, size, mtime, ctime) and its manifest's.
+- Unchanged: nothing to do. Changed: the target is a **candidate**. The watcher validates it
+  (manifest, sha256, `PRAGMA integrity_check`, about 4.5 s on a 363 MB snapshot) and warms it
+  (dense matrix, date index, a test query through the embedder) while the admitted snapshot
+  keeps serving, then swaps it in under the lease lock. The first turn after a nightly switch
+  is warm.
+- Validation or warmup fails: the target is **rejected** and the admitted snapshot keeps
+  serving. The same target and file identity are not validated again until the pointer or
+  either file changes, or the retry delay passes (15 min, 30 min, then hourly).
+- A bad pointer at startup does not stop the sidecar: it serves claims without evidence
+  (health 503, `unavailable`) and admits the snapshot once the pointer names a valid one.
+
+Request leases never validate, so a bad pointer costs nothing per turn. Logs carry the reason
+class and the target digest, never exception text or paths (manifests are untrusted). A
+plain database file (not a symlink) is validated once at startup and never swapped.
+
+A failed reranker load is retried in the background after 1, 5 and 30 minutes, then every
+30 minutes, so fetching the model files later needs no restart; turns keep the cosine gate
+meanwhile.
 
 ### `/v1/prefetch`
 
@@ -367,6 +417,11 @@ python -m quoth.control --token-file <webui sidecar-auth>/quoth.token \
 
 A Compose template is in [`deploy/compose/quoth-control.yaml`](../deploy/compose/quoth-control.yaml);
 `quoth hermes-plugin path --webui-extension` prints the extension directory inside the wheel.
+The template mounts the install at `$QUOTH_PREFIX` and the state at `$QUOTH_HOME`, the same
+absolute paths inside the containers as where they were installed: a venv's interpreter
+links are absolute, so a venv mounted at another path does not start. When the host
+directories sit elsewhere (the install ran inside the Hermes container), set
+`QUOTH_PREFIX_SOURCE` and `QUOTH_HOME_SOURCE` to them.
 
 ## Operations
 
