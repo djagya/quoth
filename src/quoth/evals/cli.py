@@ -172,7 +172,15 @@ def _cmd_online(a) -> int:
     if not Path(a.log).is_dir():
         _err("log directory not found")
         return 2
-    _print(online(a.log, a.days))
+    from .online import _when
+    for name in ("since", "until"):
+        if getattr(a, name) is not None and _when(getattr(a, name)) is None:
+            _err(f"--{name} is not an ISO-8601 time")
+            return 2
+    if a.max_turns is not None and a.max_turns < 1:
+        _err("--max-turns must be at least 1")
+        return 2
+    _print(online(a.log, a.days, since=a.since, until=a.until, max_turns=a.max_turns))
     return 0
 
 
@@ -275,6 +283,10 @@ def main(argv=None) -> int:
     po = sub.add_parser("online", help="aggregate readout of the sidecar's --prefetch-log")
     po.add_argument("--log", required=True)
     po.add_argument("--days", type=int, default=None)
+    po.add_argument("--since", default=None, help="window start, ISO-8601 (UTC when no zone)")
+    po.add_argument("--until", default=None, help="window end (exclusive), ISO-8601")
+    po.add_argument("--max-turns", type=int, default=None,
+                    help="the window is the first N authored prefetch turns (from --since)")
     po.set_defaults(func=_cmd_online)
 
     pf = sub.add_parser("fixture", help="build a fixture's stores (snapshot, ledger, state.db, lanes)")
