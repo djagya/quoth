@@ -380,7 +380,7 @@ Integer fields are clamped to their range (`max(lo, min(n, hi))`); for example `
 ### `/v1/health`
 
 ```json
-{"ok": true, "schema": "quoth-sidecar/v1", "version": "0.16.0", "status": "green",
+{"ok": true, "schema": "quoth-sidecar/v1", "version": "0.17.0", "status": "green",
  "ledger": {"status": "green", "reasons": [], "pending": 2, "accepted_current": 10,
             "oldest_pending_age_days": 0.0},
  "evidence": {"status": "ok", "state": "admitted", "snapshot_id": "<sha256>", "pointer": true,

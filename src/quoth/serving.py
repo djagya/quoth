@@ -156,10 +156,8 @@ def _discard(conn) -> None:
     for key in list(_MATRIX_CACHE):
         if key[0] == id(conn):
             _MATRIX_CACHE.pop(key, None)
-    from .snapshot_contract import drop_cache as drop_contract_cache
     drop_cache(conn)
     drop_serving_cache(conn)
-    drop_contract_cache(conn)
     conn.close()
 
 

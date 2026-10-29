@@ -3,7 +3,7 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
-## Unreleased
+## 0.17.0 — hybrid retrieval, vault exclusion, freshness per hit
 
 ### Index format change: rebuild every snapshot
 

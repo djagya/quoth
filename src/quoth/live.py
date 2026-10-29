@@ -64,9 +64,9 @@ class LiveCheck:
             return "missing", 0
         except OSError:
             return None, 0
-        if facts.size is not None and st.st_size != facts.size:
+        if st.st_size != facts.size:
             return "changed", 0
-        if facts.size is not None and facts.mtime_ns is not None and st.st_mtime_ns == facts.mtime_ns:
+        if st.st_mtime_ns == facts.mtime_ns:
             return "same", 0
         if not may_hash or st.st_size > self.max_bytes:
             return None, 0

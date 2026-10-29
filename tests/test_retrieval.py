@@ -42,22 +42,9 @@ EXTRA = {
 
 
 def _add_contract(db_path: Path, vault: Path) -> None:
-    """Add what the 0.17 index writes (when this index code does not): file facts and links."""
+    """Swap the indexed links of one chunk for two known ones: resolved and excluded."""
     import sqlite3
     conn = sqlite3.connect(db_path)
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(source_versions)")}
-    for col in (snapshot_contract.MTIME_COLUMN, snapshot_contract.SIZE_COLUMN):
-        if col not in cols:
-            conn.execute(f"ALTER TABLE source_versions ADD COLUMN {col} INTEGER")
-    for vid, path in conn.execute("SELECT v.id, s.path FROM source_versions v JOIN sources s ON s.id=v.source_id"
-                                  " WHERE v.is_current=1").fetchall():
-        st = os.stat(vault / path)
-        conn.execute(f"UPDATE source_versions SET {snapshot_contract.MTIME_COLUMN}=?,"
-                     f" {snapshot_contract.SIZE_COLUMN}=? WHERE id=?", (st.st_mtime_ns, st.st_size, vid))
-    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    if "links" not in tables:
-        conn.execute("CREATE TABLE links (chunk_id INTEGER REFERENCES chunks(id), target TEXT,"
-                     " target_path TEXT, heading TEXT, line INTEGER, kind TEXT, status TEXT NOT NULL)")
     conn.execute("DELETE FROM links")
     (cid,) = conn.execute("SELECT c.id FROM chunks c JOIN source_versions v ON v.id=c.source_version_id"
                           " JOIN sources s ON s.id=v.source_id WHERE s.path='PROJECTS/Voice/Overview.md'"
@@ -290,8 +277,8 @@ def test_live_check_hashes_only_when_size_matches_but_mtime_does_not(tmp_path):
     note.write_bytes(b"hello WORLD")  # same size, new bytes
     hits = [{"path": "n.md", "_indexed": facts}]
     assert check.check(hits)["hashes"] == 1 and hits[0]["live"] == "changed"
-    # Unknown mtime/size: hash, within the cap; past it the hit stays unchecked.
-    many = [{"path": "n.md", "_indexed": snapshot_contract.IndexedFile(digest, None, None)}]
+    # Same size, other mtime: hash, within the cap; past it the hit stays unchecked.
+    many = [{"path": "n.md", "_indexed": snapshot_contract.IndexedFile(digest, 0, len(b"hello WORLD"))}]
     many += [{"path": f"m{i}.md", "_indexed": facts} for i in range(12)]
     cost = LiveCheck(root, max_stats=4, max_hashes=1).check(many)
     assert cost["stats"] == 4 and cost["hashes"] == 1 and cost["unchecked"] == 9
@@ -322,14 +309,15 @@ def test_indexed_label():
     assert sidecar.indexed_label("garbage") is None and sidecar.indexed_label(None) is None
 
 
-def test_contract_reads_are_absent_not_errors_on_an_old_snapshot(tmp_path, vault):
-    conn = open_db(tmp_path / "old.db")
+def test_contract_reads_what_the_index_writes(tmp_path, vault):
+    conn = open_db(tmp_path / "fresh.db")
     ingest_vault(conn, vault)
     try:
-        ids = [r[0] for r in conn.execute("SELECT id FROM chunks LIMIT 3")]
-        assert snapshot_contract.chunk_links(conn, ids, 5) == {}
-        facts = snapshot_contract.indexed_files(conn, ["PROJECTS/Garden.md"])
-        assert facts["PROJECTS/Garden.md"].mtime_ns is None and len(facts["PROJECTS/Garden.md"].sha256) == 64
+        facts = snapshot_contract.indexed_files(conn, ["PROJECTS/Garden.md"])["PROJECTS/Garden.md"]
+        st = os.stat(vault / "PROJECTS/Garden.md")
+        assert (facts.mtime_ns, facts.size, len(facts.sha256)) == (st.st_mtime_ns, st.st_size, 64)
+        assert snapshot_contract.indexed_files(conn, []) == {}
+        assert snapshot_contract.chunk_links(conn, [], 5) == {}
     finally:
         conn.close()
     assert snapshot_contract.manifest_built_at({"built_at": BUILT_AT}) == BUILT_AT
