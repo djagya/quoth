@@ -952,7 +952,8 @@ class Quoth:
             raise SidecarError(exc.code) from exc
         except ValueError as exc:
             raise SidecarError("invalid_evidence_request") from exc
-        self._log_tool("evidence_bundle", body, result)
+        if not body.get("dry_run"):  # eval runs are not the assistant's searches
+            self._log_tool("evidence_bundle", body, result)
         return result
 
     def mirror(self, body: dict) -> dict:

@@ -498,3 +498,32 @@ def test_shipped_golden_fixture_is_synthetic():
     evalset = convert_in_memory("golden-v1", REPO / "eval" / "golden.jsonl")
     assert [to_golden_v1(r) for r in evalset.rows] == rows
     assert evalset.manifest["source"]["format"] == "golden-v1"
+
+
+def test_cli_trace_out_and_both_retrieval_modes(built, tmp_path, capsys):
+    """`--trace-out` writes the caller-test trace; the explicit bundle is scored in the receipt."""
+    fixture_dir = str(Path(built["paths"]["db"]).parent)
+    evalset = load_set(SET)
+    receipts = {}
+    for mode in ("hybrid", "dense"):
+        out, trace = tmp_path / f"{mode}.json", tmp_path / f"{mode}.trace.jsonl"
+        assert cli_main(["eval", "run", str(SET), "--fixture-dir", fixture_dir, "--out", str(out),
+                         "--trace-out", str(trace), "--retrieval", mode, "--quiet"]) == 0
+        err = capsys.readouterr().err
+        assert "--trace-out" in err and "private" in err and oct(trace.stat().st_mode & 0o777) == "0o600"
+        receipts[mode] = json.loads(out.read_text())
+        lines = [json.loads(x) for x in trace.read_text().splitlines()]
+        assert [r["id"] for r in lines] == [r["id"] for r in evalset.rows]
+        first = lines[0]
+        assert set(first) == {"id", "snapshot_id", "quoth_version", "settings", "query", "lang",
+                              "prefetch_block", "explicit", "labels"}
+        assert first["settings"]["retrieval"] == mode and first["snapshot_id"]
+        assert first["query"] == evalset.rows[0]["question"]
+        assert set(first["labels"]) == {"answerable", "kind"}
+        assert any(r["explicit"] and set(r["explicit"][0]) == {"locator", "note_date", "project", "live", "text"}
+                   for r in lines)
+        assert any(r["prefetch_block"].startswith("<quoth-recall>") for r in lines)
+    for mode, data in receipts.items():
+        assert data["config"]["retrieval"] == mode
+        assert data["explicit"]["calls"] > 0 and data["explicit"]["hit@10"] is not None
+        assert "explicit" in json.dumps(data["latency_ms"])

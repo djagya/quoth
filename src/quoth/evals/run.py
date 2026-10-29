@@ -353,7 +353,7 @@ def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATE
                 from ..sidecar import prefetch_query
                 t1 = time.monotonic()
                 explicit = target.evidence({"query": prefetch_query(row["question"]) or row["question"],
-                                            "k": EXPLICIT_K})
+                                            "k": EXPLICIT_K, "dry_run": True})
                 explicit_ms = round((time.monotonic() - t1) * 1000, 2)
             if trace is not None:
                 trace.append(trace_line(row, out, explicit, settings))
