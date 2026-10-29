@@ -16,7 +16,8 @@ Files live under ``<cache>/<repo>/`` with the embedder's cache (``QUOTH_MODEL_CA
 Nothing here is part of the index contract: no score is stored in a snapshot.
 `RerankService` loads the model off the request path and retries a failed load with backoff.
 The sidecar scores on its own rerank worker, apart from the evidence worker, and a turn whose
-scores are not ready in time keeps the cosine gate.
+scores are not ready in time keeps the cosine gate. The reranker scores the same excerpt the
+recall block injects (`relevance.vault_text`).
 """
 from __future__ import annotations
 
@@ -35,6 +36,7 @@ import time
 import numpy as np
 
 from . import paths
+from .recall_defaults import RERANK_BUDGET, RERANK_MAX_TOKENS
 
 log = logging.getLogger(__name__)
 
@@ -48,13 +50,14 @@ TOKENIZER_SHA256 = (
     ("special_tokens_map.json", "8c785abebea9ae3257b61681b4e6fd8365ceafde980c21970d001e834cf10835"),
     ("config.json", "122e922dcfed6503c8721e6fe1daf090340c3d95ca7f3aa3a72730b321a51cfd"),
 )
-# Query + passage tokens per pair (longest first truncation). The injected snippet is 360
-# characters; 192 tokens hold it plus a query, and keep 3 pairs near half a second on 6 threads.
-MAX_TOKENS = 192
+# Query + passage tokens per pair (longest first truncation). The injected snippet
+# (recall_defaults.VAULT_SNIPPET characters) fits with a query, and 3 pairs stay near half a
+# second on 6 threads.
+MAX_TOKENS = RERANK_MAX_TOKENS
 # Passage characters handed to the tokenizer (bounded work before truncation).
 PASSAGE_CHARS = 1200
 # Seconds the scores of one turn may take after the vault hits are ready.
-DEFAULT_BUDGET = 0.8
+DEFAULT_BUDGET = RERANK_BUDGET
 
 
 class RerankerUnavailable(RuntimeError):

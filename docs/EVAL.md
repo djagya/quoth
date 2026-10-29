@@ -91,22 +91,26 @@ Each row is one `POST /v1/prefetch` with `dry_run: true` (nothing is marked used
 `k_candidates` (default 10, max 20). In a dry run the sidecar returns, besides what it
 injected, `detail.candidates`: one ranked list per store before injection (claims, vault
 evidence, and both lanes searched without their score floor), each item flagged `injected`.
-Serving is unchanged: the injected part is exactly the prefix each store serves. Vault and
-claim candidates also carry the relevance gate's view: `served` (in the prefix serving would
-inject), `lexical` (share of the query's content words in the item; vault hits also
-`matched`, the count; claims also `gate_score`), `passed` and `gate` (the reason). With a
-reranker loaded, they also carry `rerank` and `rerank_ms`.
+Serving is unchanged: what is injected is chosen from the live pool of each store, whatever
+the candidate depth. Vault and claim candidates also carry the relevance gate's view: `pool`
+(in the live pool a turn judges), `lexical` (share of the query's content words in the
+injected text; vault hits also `matched`, the count; claims also `gate_score`), `passed` and
+`gate` (the reason). With a reranker loaded, they also carry `rerank` and `rerank_ms`.
+`score` per store is described in [HERMES.md](HERMES.md#recall-v1prefetch).
 
 Targets:
 
 - **In-process** (default): a sidecar built from `--db --ledger --state-db --episodes
   --owner-episodes --model`, or from `--fixture-dir` (a directory built by `eval fixture`),
   with the sidecar's own flags (`--evidence-budget`, `--episodes-prefetch`,
-  `--owner-prefetch`, `--episode-min-score`, `--owner-min-score`, the relevance gate and the
-  reranker flags). It embeds all accepted claims first and waits for background searches
-  between rows. A missing reranker model stops the run (exit 2).
+  `--owner-prefetch`, `--assistant-min-score`, `--owner-min-score`, the relevance gate and the
+  reranker flags). The gate starts at the serving defaults (`--vault-min-cosine 0.53
+  --vault-max-gap 0.15`), exactly as the sidecar serves; pass `--vault-min-cosine off
+  --vault-max-gap off` to score without a gate. It embeds all accepted claims first and waits
+  for background searches between rows. A missing reranker model stops the run (exit 2).
 - **`--socket PATH`**: a live sidecar. Read-only, shares the loaded model, and runs with the
-  sidecar's own gate (recorded from `/v1/health`); gate and rerank flags are refused here.
+  sidecar's own gate (recorded from `/v1/health`); gate flags other than the defaults and
+  rerank flags are refused here.
   The evidence budget defaults to 30 seconds.
 
 `--gold-drift` (needs `--db`) resolves expected vault paths against the snapshot with the
@@ -152,13 +156,14 @@ gate scores with the same candidates and matching.
  "candidates": {"schema": "quoth-eval-candidates/v1", "rows": {"<id>": {
    "abstain": false, "answerable": true, "has_stale": false,
    "stores": {"vault": {"expected": 1, "items": [
-     {"score": 0.61, "lexical": 0.5, "matched": 2, "match": [0], "served": true, "injected": true,
+     {"score": 0.61, "lexical": 0.5, "matched": 2, "match": [0], "pool": true, "injected": true,
       "rerank": 0.93}]}}}}}}
 ```
 
 Row ids are the per-row key. `candidates` keeps, per row and store, each candidate's score,
 lexical coverage, which expected sources it matches (indices; `stale` when it matches a stale
-source), and whether serving would inject it: the input of `eval sweep`. The harness refuses
+source), whether it is in the live pool and whether it was injected: the input of `eval
+sweep`. The harness refuses
 to return a receipt that contains any question, expected path, hint or context text of the
 set. `--detail-out FILE` writes per-row candidate ids, locators and scores (no text) with mode
 0600; locators include note paths, so keep it private.
@@ -182,11 +187,16 @@ stale_leak +0, claims hit@5 −0.02, lanes hit@5 −0.05, wall p95 +50 %). Lost 
 
 ## Relevance gate and `eval sweep`
 
-Without a gate, prefetch injects every served item: the top 3 vault hits and up to 6 claims,
-whatever their score, so a question with nothing relevant still gets a full block. The
-relevance gate (`quoth.relevance`) judges what serving would inject and keeps only what
-clears a bar. It never changes retrieval or the candidate lists, so `hit@k` and the nightly
-gate are unaffected. Every threshold is off by default.
+Without a gate, prefetch injects the top 3 vault hits and up to 6 claims whatever their
+score, so a question with nothing relevant still gets a full block. The relevance gate
+(`quoth.relevance`) judges every candidate in a turn's pool (the 10 best vault hits, up to 12
+claims by meaning and 12 by words) and injects the best that pass. It never changes
+retrieval or the candidate lists, so `hit@k` and the nightly gate are unaffected. The
+serving default (`recall_defaults.GATE`) is a vault floor of 0.53 and a gap of 0.15; every
+other rule is off. On the golden sets against a real snapshot no cosine or rerank floor
+separated unanswerable rows from answerable ones without losing answers, so the default
+stays conservative and the block's status line ("none above the relevance floor") carries
+the rest of the signal.
 
 **Scores.** Vault evidence is dense-only: a hit carries its cosine to the query (normalized
 vectors). Cosine is an absolute similarity, so one floor means the same thing for every
@@ -194,29 +204,35 @@ query, but its level shifts with query length and language; the gap to the turn'
 the query-relative signal. Meaning-matched claims carry their cosine; word-matched claims have
 none.
 
-**Words.** `lexical` is the share of the query's content words found in the item's text,
-`matched` how many. Words are casefolded (ё read as е); function words of en, ru, pt and de,
-conversational filler and 1–2 letter words are dropped; a word loses one inflection ending and
-is cut to 6 letters; numbers stay whole.
+**Words.** `lexical` is the share of the query's content words found in the item's injected
+text (a vault hit's 360-character excerpt, a claim's text), `matched` how many. Words are
+casefolded (ё read as е); function words of en, ru, pt and de (Russian pronoun, relative and
+auxiliary forms included), conversational filler and 1–2 letter words are dropped; a word
+loses one inflection ending and is cut to 6 letters; numbers stay whole. The same measure
+selects word-matched claims: a claim needs at least one of the query's content words.
 
 **Rules.**
 
 | Flag | Effect | Reason when it decides |
 |---|---|---|
-| `--vault-min-cosine X` | drop vault hits under X | `below_floor` |
-| `--vault-max-gap X` | drop vault hits more than X below the turn's top hit | `gap` |
+| `--vault-min-cosine X` (default 0.53) | drop vault hits under X | `below_floor` |
+| `--vault-max-gap X` (default 0.15) | drop vault hits more than X below the turn's top hit | `gap` |
 | `--vault-lexical-rescue X` | a hit with this share of the query's words (at least 2) passes anyway; needs one of the two above | `lexical` |
 | `--claims-min-cosine X` | a meaning-matched claim needs this cosine | `cosine` / `below_floor` |
 | `--claims-min-lexical X` | a word-matched claim needs this share of the query's words | `lexical` / `weak_words` |
 
-A vault hit that passes neither rule fails; one no rule touches passes `cosine`. An item
-without a score passes (`unscored`). A claim's gate score is its cosine in the serving list
-only, so a dry run with deeper candidates judges it exactly as a live turn does. A dropped
-slot stays empty, and when nothing passes the vault section is left out. `/v1/health` reports
-the thresholds and `vault_on`/`claims_on` under `relevance_gate`.
+Every flag takes `off` to turn its rule off. A vault hit that passes neither rule fails;
+one no rule touches passes `cosine`. An item without a score passes (`unscored`). A claim's
+gate score is its cosine in the turn's meaning pool only, so a dry run with deeper candidates
+judges it exactly as a live turn does. A dropped slot is refilled by the next pool candidate
+that passes; when no vault candidate passes, the block says so in one line instead of a vault
+section. `/v1/health` reports the thresholds and `vault_on`/`claims_on` under
+`relevance_gate`.
 
 **Sweep.** `eval sweep` replays `relevance.Gate` on a receipt's candidates exactly as the
-sidecar would and scores each config with the harness metrics. Ranked metrics count an
+sidecar would (judge the pool, inject the best that pass) and scores each config with the
+harness metrics. Its time budgets default to the sidecar's (`--evidence-budget 1.5`,
+`--rerank-budget 0.8`). Ranked metrics count an
 expected source only if it passes the gate. Default grids: vault floors in 0.01 steps over the
 recorded scores × gaps (off, 0.02–0.2) × rescues (off, 0.5, 0.75, 1.0); claim floors in 0.01
 steps × word shares (off, 0.25–1.0); then the 5 best of each combined. `--vault-cosines`,
@@ -227,17 +243,20 @@ A config is eligible when the injected hit rate and the vault's and claims' inje
 rates each lose at most `--max-loss` (default 0.01) against no gate. The recommendation
 maximizes injected precision + (1 − abstain_nonempty_rate), then hits, then keeps the most
 items and sets the fewest thresholds. The table shows the vault floor curve, the best
-eligible configs and the recommended sidecar flags; `--out` writes every config as JSON and
+eligible configs and the recommended sidecar flags (every threshold that differs from the
+serving default, `off` included); `--out` writes every config as JSON and
 `--format json` prints it. Output holds configs and aggregates only.
 
 ```sh
 uv run quoth eval fixture --out /tmp/quoth-fixture
 uv run quoth eval run eval/public/set.jsonl --fixture-dir /tmp/quoth-fixture \
-    --episodes-prefetch on --gold-drift --out /tmp/run.json --quiet
+    --episodes-prefetch on --gold-drift --vault-min-cosine off --vault-max-gap off \
+    --out /tmp/run.json --quiet
 uv run quoth eval sweep /tmp/run.json --out /tmp/sweep.json
 # Check a pick: the same run with the flags, then compare.
 uv run quoth eval run eval/public/set.jsonl --fixture-dir /tmp/quoth-fixture \
-    --episodes-prefetch on --gold-drift --vault-min-cosine 0.35 --out /tmp/gated.json --quiet
+    --episodes-prefetch on --gold-drift --vault-min-cosine 0.35 --vault-max-gap off \
+    --out /tmp/gated.json --quiet
 uv run quoth eval compare /tmp/run.json /tmp/gated.json
 ```
 
@@ -270,15 +289,15 @@ quoth rerank check                      # verify, load, score 3 public pairs, pr
 ```
 
 It prints the load time and the latency of 3 pairs, short (`ms_3_pairs`) and filled to the
-token limit (`ms_3_pairs_full`). Each pair is the query and the hit's text truncated together
-to `--rerank-max-tokens` (default 192); the score is `sigmoid(logit)`, 0..1. Threads follow
+token limit (`ms_3_pairs_full`). Each pair is the query and the hit's injected excerpt (360
+characters) truncated together to `--rerank-max-tokens` (default 192); the score is `sigmoid(logit)`, 0..1. Threads follow
 the CPU quota like BGE-M3 (`QUOTH_EMBED_THREADS` overrides). Loaded, either variant adds up to
 about 1.5 GB of peak memory to the sidecar.
 
 **On a turn.** The sidecar loads the reranker in the background after BGE-M3's warm-up
 (`reranker.status`: `loading`, `ready`, `unavailable`). It scores on its own worker thread, so
 the next turn's evidence search never waits behind it: first the hits the turn reranks, then
-(with `--rerank-claims`) the claims it serves, then a dry run's deeper candidates. The turn
+(with `--rerank-claims`) the claims in its pool, then a dry run's deeper candidates. The turn
 waits at most `--rerank-budget` seconds (default 0.8), never past the evidence budget, then
 cancels the job. `status.rerank`: `ok`; `partial` (vault scores arrived, claims or deeper hits
 did not); `slow`; `busy` (the previous turn's job is still finishing); `loading`,
@@ -297,7 +316,9 @@ is score-only: dry runs score, live turns do not.
 | `--claims-min-rerank X` | a scored claim needs this score | `rerank` / `rerank_floor` |
 
 When every vault hit the turn reranks has a score, these decide instead of the cosine rules
-(no lexical rescue); a passing hit gets `rerank`. An unscored claim keeps the claim rules.
+(no lexical rescue); a passing hit gets `rerank`. The turn then injects only from the hits it
+reranked (the top 3, or the widen), so a slot is never refilled by a hit no rerank rule
+judged. An unscored claim keeps the claim rules.
 Every rerank flag needs `--rerank-model`; the sidecar and `eval run` refuse them alone.
 
 **Sweep.** On a receipt with rerank scores, `eval sweep` adds vault rerank configs (floors
@@ -343,10 +364,11 @@ JSON line per real (non-dry-run) prefetch to `DIR/prefetch-YYYY-MM-DD.jsonl` (UT
 directory 0700):
 
 ```json
-{"type": "prefetch", "ts": "…", "v": "0.15.0", "session": "<sha256(session_id)[:16]>",
+{"type": "prefetch", "ts": "…", "v": "0.16.0", "session": "<sha256(session_id)[:16]>",
  "query_sha256": "…", "query_len": 42,
- "stores": {"claims": [{"id": 12, "score": 0.71, "via": "dense", "injected": true}],
-            "vault": [{"locator": "PROJECTS/x.md:3-9", "score": 0.58, "served": true, "lexical": 0.5,
+ "stores": {"claims": [{"id": 12, "score": 0.71, "via": "dense", "pool": true, "gate_score": 0.71,
+                        "lexical": 0.5, "passed": true, "gate": "off", "injected": true}],
+            "vault": [{"locator": "PROJECTS/x.md:3-9", "score": 0.58, "pool": true, "lexical": 0.5,
                        "matched": 2, "passed": true, "gate": "cosine", "injected": true}],
             "owner": [{"locator": "hermes:S:M", "score": 0.66, "injected": true}]},
  "status": {"vault": "ok", "owner": "ok", "assistant": "off"},

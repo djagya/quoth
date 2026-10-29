@@ -3,7 +3,55 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
-## Unreleased
+## 0.16.0 — one recall path, snapshot admission off the request path
+
+### Recall
+
+Recall takes one decision path: one module for its defaults, one query vector, one lexical
+measure, and the gate before the cut.
+
+Expected behaviour changes:
+
+- **The relevance gate is on by default**: a vault hit needs a cosine of at least 0.53 and at
+  most 0.15 below the turn's top hit (`recall_defaults.GATE`), on the sidecar and in
+  `eval run`. Claims stay ungated. `--vault-min-cosine off --vault-max-gap off` (any gate flag
+  takes `off`) restores the ungated block. `eval sweep`'s recommended flags now name every
+  threshold that differs from the default, `off` included.
+- **Word-matched claims need a content word.** Lexical claim recall (prefetch, `/quoth recall`,
+  `ledger.recall`) uses the gate's measure: casefolded, function words of en/ru/pt/de dropped,
+  light stems, ranked by the share of the query's content words, then newest. A claim that
+  shares only "the"/"is"/"in" (or "это"/"был"/"который") with a query is no longer served, and
+  inflected forms match ("квартиры"/"квартиру"). More Russian function words are dropped
+  (relative, demonstrative and auxiliary forms).
+- **`use_count` counts only injected claims**, after the gate, so junk word matches no longer
+  reorder the core block.
+- **Gate before the cut.** Each turn judges a pool (the 10 best vault hits, up to 12 claims by
+  meaning and 12 by words) and injects the best that pass, so a dropped slot is refilled. With
+  rerank rules deciding, only the reranked hits are eligible.
+- **The judged text is the injected text**: the gate's word coverage and the reranker score a
+  vault hit's 360-character excerpt (what the block shows), not the whole hit.
+- **The block says why the vault shows nothing**: `Vault evidence: late …` (slow or busy),
+  `… unavailable …`, or `… none above the relevance floor …`. Shown vault evidence opens with a
+  standing line that the excerpts are the closest notes found and may not answer the question.
+  A turn whose only content is that line now injects a short block instead of nothing.
+- **`k_claims` bounds meaning-matched claims too** (before, they were cut at 6 whatever it was).
+- **Meaning-matched claims tie newest first**, as word matches do (before, oldest first).
+- **The lane floor compares the reported (4-decimal) score** live as on dry runs: a 0.61996
+  match now passes a 0.62 floor in both.
+- **One query embedding per turn**: the query-vector cache is single-flight, so the owner lane,
+  the vault search and the claim index share one embed of a cold query (before, one each).
+- **Trace and log fields**: `served` is replaced by `pool` (the candidate was judged for this
+  turn); `passed`/`gate` are the gate's decision and `injected` that it reached the block.
+  Dry-run `detail` adds `vault_note`.
+- **New sidecar flag `--assistant-min-score`** (the assistant lane's floor, symmetric with
+  `--owner-min-score`); `eval run --episode-min-score` is renamed `--assistant-min-score`.
+- `quoth/recall_defaults.py` holds every recall budget, count, cap and floor; the sidecar,
+  gate, reranker, lanes, claim index, prefetch log, `eval run` and `eval sweep` import it, and
+  a test checks the numbers in `docs/HERMES.md` and `docs/EVAL.md` against it. Doc fixes: the
+  rerank budget and token defaults (0.8 s, 192), the assistant-lane flag, and `score` per
+  store.
+
+### Serving
 
 - **Snapshot admission off the request path.** A pointer is watched by a background thread
   that validates and warms a new target while the admitted snapshot keeps serving, then swaps

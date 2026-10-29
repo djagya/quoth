@@ -1,8 +1,10 @@
 """Relevance gate: signals, decisions and reasons, prefetch injection (off = unchanged,
-abstain when nothing clears), dry-run and log reporting, and the sweep's replay math."""
+gate before the cut, a status line when nothing clears), dry-run and log reporting, and the
+sweep's replay math."""
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 
 import pytest
@@ -80,7 +82,10 @@ def test_a_rescue_alone_is_refused():
     p = argparse.ArgumentParser()
     relevance.add_arguments(p)
     with pytest.raises(SystemExit):
-        relevance.from_args(p.parse_args(["--vault-lexical-rescue", "0.5"]), p)
+        relevance.from_args(p.parse_args(["--vault-min-cosine", "off", "--vault-max-gap", "off",
+                                          "--vault-lexical-rescue", "0.5"]), p)
+    # With the serving defaults' floor and gap a rescue is coherent.
+    assert relevance.from_args(p.parse_args(["--vault-lexical-rescue", "0.5"]), p).vault_lexical_rescue == 0.5
     status = Gate(vault_max_gap=0.1, vault_lexical_rescue=0.5).status()
     assert status["vault_on"] and not status["claims_on"]
 
@@ -106,8 +111,14 @@ def test_flags_round_trip_through_argparse():
     p = argparse.ArgumentParser()
     relevance.add_arguments(p)
     assert relevance.from_args(p.parse_args(gate.flags())) == gate
-    assert relevance.from_args(p.parse_args([])) == Gate()
+    # No flags: the serving defaults; their flags are none, and `off` turns a default check off.
+    assert relevance.from_args(p.parse_args([])) == relevance.default_gate()
+    assert relevance.default_gate().flags() == []
+    assert relevance.from_args(p.parse_args(Gate().flags())) == Gate()
+    assert Gate().flags() == ["--vault-min-cosine", "off", "--vault-max-gap", "off"]
     assert Gate.from_dict(gate.to_dict()) == gate and Gate.from_dict(None) == Gate()
+    assert gate.label() == "vault-min-cosine=0.52 vault-max-gap=0.08 claims-min-lexical=0.34"
+    assert Gate().label() == "no gate"
 
 
 # ------------------------------------------------------------------ prefetch
@@ -135,15 +146,15 @@ def _app(tmp_path, state_db, gate=None, hits=HITS):
                          evidence_budget=5.0, gate=gate)
 
 
-def test_gate_off_injects_exactly_what_serving_did(tmp_path, state_db):
-    plain = _app(tmp_path, state_db)
+def test_gate_off_injects_the_top_hits(tmp_path, state_db):
+    plain = _app(tmp_path, state_db, Gate())
     try:
         out = plain.prefetch({"query": "how do I feed the sourdough starter", "dry_run": True,
                               "k_candidates": 4})
         assert out["evidence"] == 3 and all(h["locator"] in out["text"] for h in HITS[:3])
         vault = out["detail"]["candidates"]["vault"]
         assert [c["injected"] for c in vault] == [True, True, True, False]
-        assert [c["served"] for c in vault] == [True, True, True, False]
+        assert [c["pool"] for c in vault] == [True] * 4  # all judged; the top 3 that pass are injected
         assert {c["gate"] for c in vault} == {"off"} and all(c["passed"] for c in vault)
         assert plain.health()["relevance_gate"] == Gate().status()
     finally:
@@ -160,18 +171,20 @@ def test_gate_drops_weak_hits_and_reports_why(tmp_path, state_db):
         assert [(c["passed"], c["gate"]) for c in vault] == [
             (True, "cosine"), (False, "gap"), (False, "below_floor"), (False, "below_floor")]
         assert [c["injected"] for c in vault] == [True, False, False, False]
-        assert [c["served"] for c in vault] == [True, True, True, False]  # rank 4 never served
+        assert [c["pool"] for c in vault] == [True] * 4
         assert vault[0]["lexical"] == 1.0 and vault[1]["lexical"] == 0.0
         assert [e["locator"] for e in out["detail"]["evidence"]] == ["a.md:1-2"]
     finally:
         app.close()
 
 
-def test_gate_abstains_when_nothing_clears_the_bar(tmp_path, state_db):
+def test_gate_says_so_when_nothing_clears_the_bar(tmp_path, state_db):
     app = _app(tmp_path, state_db, Gate(vault_min_cosine=0.8))
     try:
         out = app.prefetch({"query": "what is the capital of Peru"})
-        assert out["evidence"] == 0 and out["evidence_status"] == "ok" and out["text"] == ""
+        assert out["evidence"] == 0 and out["evidence_status"] == "ok"
+        assert out["text"] == ("<quoth-recall>\n" + sidecar.VAULT_NOTES["none_relevant"] + "\n</quoth-recall>")
+        assert not any(h["locator"] in out["text"] for h in HITS)
     finally:
         app.close()
 
@@ -198,7 +211,7 @@ def test_claims_gate_drops_incidental_word_matches(tmp_path, state_db):
         assert out["claims"] == 1 and "green tea" in out["text"] and "tea rose" not in out["text"]
         claims = {c["text"]: c for c in out["detail"]["candidates"]["claims"]}
         rose = claims["The garden has a tea rose."]
-        assert rose["served"] and not rose["injected"] and rose["gate"] == "weak_words"
+        assert rose["pool"] and not rose["injected"] and rose["gate"] == "weak_words"
         # Only what reached the block counts as used (live turn).
         app.prefetch({"query": "which green tea do I drink in the morning"})
         with app.lock:
@@ -208,9 +221,10 @@ def test_claims_gate_drops_incidental_word_matches(tmp_path, state_db):
         app.close()
 
 
-def test_claims_gate_judges_the_serving_dense_list_in_eval_and_live(tmp_path, state_db, monkeypatch):
-    """Stale index ids above a claim at dense rank 8: live it is a word match (unscored); a
-    deeper dry run must judge it the same, not by its rank-8 cosine, and so must the sweep."""
+def test_claims_gate_judges_the_dense_pool_in_eval_and_live(tmp_path, state_db, monkeypatch):
+    """Stale index ids above a claim at dense rank 14 (past the pool): live it is a word match
+    (unscored); a deeper dry run must judge it the same, not by its rank-14 cosine, and so
+    must the sweep."""
     from quoth.ledger import core
     app = _app(tmp_path, state_db, Gate(claims_min_cosine=0.8), hits=[])
     try:
@@ -218,11 +232,11 @@ def test_claims_gate_judges_the_serving_dense_list_in_eval_and_live(tmp_path, st
             cid = core.propose(app.conn, text="Alex drinks oolong tea every morning.", kind="preference",
                                origin="assistant_proposal", proposer="t", reason="r")["claim"]["id"]
             core.accept(app.conn, cid, actor="t")
-        dense = [(90001 + i, 0.95 - i / 100) for i in range(7)] + [(cid, 0.70)]  # 7 stale ids first
+        dense = [(90001 + i, 0.95 - i / 100) for i in range(sidecar.CLAIM_POOL + 1)] + [(cid, 0.70)]
         monkeypatch.setattr(app, "_dense_work", lambda q, k, k_claims: {"hits": [], "claims": dense[:k_claims]})
         query = "which oolong tea do I drink in the morning"
         live = app.prefetch({"query": query, "dry_run": True})
-        deep = app.prefetch({"query": query, "dry_run": True, "k_candidates": 10})
+        deep = app.prefetch({"query": query, "dry_run": True, "k_candidates": 20})
         assert live["claims"] == deep["claims"] == 1 and live["text"] == deep["text"]
         (cand,) = deep["detail"]["candidates"]["claims"]
         assert cand["score"] == 0.70 and cand["gate_score"] is None and cand["gate"] == "unscored"
@@ -243,8 +257,10 @@ def test_prefetch_log_carries_gate_fields_without_text(tmp_path, state_db):
         app.prefetch_log.flush()
         raw = "".join(p.read_text() for p in (tmp_path / "log").glob("*.jsonl"))
         turn = json.loads(raw.splitlines()[0])
-        assert [(v["passed"], v["gate"]) for v in turn["stores"]["vault"]] == [
-            (True, "cosine"), (True, "cosine"), (False, "below_floor")]
+        assert [(v["pool"], v["passed"], v["gate"], v["injected"]) for v in turn["stores"]["vault"]] == [
+            (True, True, "cosine", True), (True, True, "cosine", True), (True, False, "below_floor", False),
+            (True, False, "below_floor", False)]
+        assert "served" not in json.dumps(turn)
         assert "sourdough" not in raw and "rent" not in raw
     finally:
         app.close()
@@ -256,13 +272,13 @@ def test_sidecar_cli_accepts_gate_flags(monkeypatch):
     with pytest.raises(SystemExit):
         sidecar.main(["--ledger", ":memory:", "--state-db", "", "--vault-min-cosine", "0.55",
                       "--claims-min-lexical", "0.5"])
-    assert seen["gate"] == Gate(vault_min_cosine=0.55, claims_min_lexical=0.5)
+    assert seen["gate"] == replace(relevance.default_gate(), vault_min_cosine=0.55, claims_min_lexical=0.5)
 
 
 # ------------------------------------------------------------------ sweep math
 
-def _item(score, served=True, match=(), lexical=None):
-    out = {"score": score, "served": served, "injected": served}
+def _item(score, pool=True, match=(), lexical=None):
+    out = {"score": score, "pool": pool, "injected": pool}
     if match:
         out["match"] = list(match)
     if lexical is not None:
@@ -278,7 +294,7 @@ def _rec(vault, expected=1, abstain=False):
 
 ROWS = {
     # Gold at rank 1 (0.80) with two weak neighbours.
-    "a": _rec([_item(0.80, match=[0]), _item(0.45), _item(0.42), _item(0.30, served=False)]),
+    "a": _rec([_item(0.80, match=[0]), _item(0.45), _item(0.42), _item(0.30, pool=False)]),
     # Gold at rank 2 (0.60), and a strong distractor.
     "b": _rec([_item(0.66), _item(0.60, match=[0]), _item(0.35)]),
     # Nothing relevant exists.
@@ -310,9 +326,11 @@ def test_sweep_recommends_the_best_config_within_the_loss_bound():
     rec = result["recommended"]
     assert rec["abstain_nonempty_rate"] == 0.0 and rec["eligible"]
     # Equal outcomes: the gentlest floor wins (it keeps the most items).
-    assert rec["gate"]["vault_min_cosine"] == 0.49 and result["flags"] == "--vault-min-cosine 0.49"
+    # Flags set exactly the replayed gate: the default gap is turned off.
+    assert rec["gate"]["vault_min_cosine"] == 0.49
+    assert result["flags"] == "--vault-min-cosine 0.49 --vault-max-gap off"
     text = SW.table(result)
-    assert "Recommended: --vault-min-cosine 0.49" in text and "| no gate |" in text
+    assert "Recommended: --vault-min-cosine 0.49 --vault-max-gap off" in text and "| no gate |" in text
 
 
 def test_sweep_refuses_receipts_without_candidates():
@@ -320,17 +338,19 @@ def test_sweep_refuses_receipts_without_candidates():
         SW.sweep({"schema": "quoth-eval-run/v1", "metrics": {}})
 
 
-def test_record_reads_older_sidecar_candidates():
-    """A pre-gate sidecar's dry run has no served/lexical keys: injected is served, words are counted here."""
+def test_record_keeps_signals_and_counts_words_on_the_injected_excerpt():
+    """Words missing from a candidate are counted on what the block would inject (the excerpt)."""
     row = {"id": "r", "question": "how do I feed the sourdough starter",
            "expect": {"abstain": False, "sources": [{"store": "vault", "match": {"path": "a.md"}}]}}
-    cands = {"vault": [{"locator": "a.md:1-2", "path": "a.md", "score": 0.7, "injected": True,
+    tail = "x " * 400 + "sourdough starter feed"  # past the injected excerpt: does not count
+    cands = {"vault": [{"locator": "a.md:1-2", "path": "a.md", "score": 0.7, "pool": True, "injected": True,
                         "text": "Feed the sourdough starter."},
-                       {"locator": "b.md:1-2", "path": "b.md", "score": 0.5, "injected": False, "text": "Rent."}]}
+                       {"locator": "b.md:1-2", "path": "b.md", "score": 0.5, "pool": True, "injected": False,
+                        "text": "Rent. " + tail}]}
     rec = SW.record(row, cands, row["expect"]["sources"])
     a, b = rec["stores"]["vault"]["items"]
-    assert a == {"score": 0.7, "served": True, "injected": True, "lexical": 1.0, "matched": 3, "match": [0]}
-    assert b == {"score": 0.5, "served": False, "injected": False, "lexical": 0.0}
+    assert a == {"score": 0.7, "pool": True, "injected": True, "lexical": 1.0, "matched": 3, "match": [0]}
+    assert b == {"score": 0.5, "pool": True, "injected": False, "lexical": 0.0}
     assert "text" not in json.dumps(rec) and "a.md" not in json.dumps(rec)
 
 
@@ -342,13 +362,42 @@ def test_scores_align_in_order_when_locators_repeat():
     assert [h["cosine"] for h in hits] == [0.9, 0.7, 0.6]
 
 
-def test_record_older_sidecar_claims_use_the_serving_dense_depth():
+def test_record_judges_claims_by_their_gate_score():
+    """A claim's recorded score is its cosine in the dense pool (`gate_score`), not a deeper rank."""
     row = {"id": "r", "question": "tea", "expect": {"abstain": False, "sources": []}}
-    cands = {"claims": [{"id": i, "score": 0.9 - i / 100, "via": "dense", "injected": i < 6, "text": "x"}
-                        for i in range(8)] + [{"id": 99, "score": None, "via": "lexical", "injected": False,
-                                               "text": "tea"}]}
-    scores = [it["score"] for it in SW.record(row, cands, [])["stores"]["claims"]["items"]]
-    assert scores[:6] == [round(0.9 - i / 100, 4) for i in range(6)] and scores[6:] == [None, None, None]
+    cands = {"claims": [{"id": 1, "score": 0.9, "gate_score": 0.9, "via": "dense", "pool": True, "text": "tea"},
+                        {"id": 2, "score": 0.6, "gate_score": None, "via": "dense", "pool": False, "text": "x"}]}
+    items = SW.record(row, cands, [])["stores"]["claims"]["items"]
+    assert [(it["score"], it["pool"]) for it in items] == [(0.9, True), (None, False)]
+
+
+def test_vault_pick_refills_a_dropped_slot_from_the_pool():
+    gate = Gate(vault_min_cosine=0.5, vault_lexical_rescue=0.5)
+    assert relevance.vault_pick(gate, [True, False, True, True, True], pool=5, k=3) == [0, 2, 3]
+    assert relevance.vault_pick(gate, [True, False, True, True, True], pool=3, k=3) == [0, 2]
+    assert relevance.vault_pick(gate, [False] * 4, pool=10, k=3) == []
+
+
+def test_a_lexical_rescue_refills_a_slot_the_floor_dropped(tmp_path, state_db):
+    """Gate before the cut: rank 4 (rescued by its words) takes the slot rank 2 lost."""
+    hits = [dict(h) for h in HITS]
+    hits[3] = {**hits[3], "text": "Basil in the south bed, by the starter shed.", "cosine": 0.40}
+    app = _app(tmp_path, state_db, Gate(vault_min_cosine=0.6, vault_lexical_rescue=0.5), hits=hits)
+    try:
+        out = app.prefetch({"query": "basil south bed", "dry_run": True})
+        assert [e["locator"] for e in out["detail"]["evidence"]] == ["a.md:1-2", "c.md:1-2", "d.md:1-2"]
+    finally:
+        app.close()
+
+
+def test_the_gate_judges_the_injected_excerpt():
+    """Words past the injected excerpt do not rescue a hit: the judged text is the injected text."""
+    gate = Gate(vault_min_cosine=0.6, vault_lexical_rescue=0.5)
+    far = {"text": "notes " * 100 + "basil south bed", "cosine": 0.4}
+    near = {"text": "basil south bed " + "notes " * 100, "cosine": 0.4}
+    far_j, near_j = relevance.judge_vault(gate, relevance.terms("basil south bed"), [far, near])
+    assert far_j["gate"] == "below_floor" and near_j["gate"] == "lexical"
+    assert len(relevance.vault_text(near)) == sidecar.PREFETCH_SNIPPET
 
 
 def test_evidence_scores_survive_a_shortened_bundle(snapshot_db, monkeypatch):

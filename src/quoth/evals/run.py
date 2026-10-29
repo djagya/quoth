@@ -72,11 +72,12 @@ class InProcessTarget:
     def build(cls, *, db=None, ledger=None, state_db=None, episodes=None, owner_episodes=None,
               model: str = "bge-m3", evidence_budget: float | None = None,
               episodes_prefetch: bool = False, owner_prefetch: bool = True,
-              episode_min_score: float | None = None, owner_min_score: float | None = None,
+              assistant_min_score: float | None = None, owner_min_score: float | None = None,
               core_dir=None, embedder=None, gate=None, reranker=None) -> "InProcessTarget":
         """`embedder` (optional) is an already loaded model for `model`, shared instead of
         loading another copy (the nightly gate scores two snapshots with one bge-m3);
-        `gate` a `relevance.Gate` (default off), as the sidecar's gate flags set it;
+        `gate` a `relevance.Gate` (default `relevance.default_gate()`, as the sidecar serves;
+        `relevance.Gate()` for none), as the sidecar's gate flags set it;
         `reranker` a `rerank.RerankService` (default none), as `--rerank-model` sets it."""
         from .. import sidecar
         if ledger is None:
@@ -93,8 +94,8 @@ class InProcessTarget:
         kwargs = {}
         if evidence_budget is not None:
             kwargs["evidence_budget"] = evidence_budget
-        if episode_min_score is not None:
-            kwargs["episode_min_score"] = episode_min_score
+        if assistant_min_score is not None:
+            kwargs["episode_min_score"] = assistant_min_score
         if owner_min_score is not None:
             kwargs["owner_min_score"] = owner_min_score
         app = sidecar.Quoth(ledger_path=ledger, state_db=state_db or None, evidence=evidence,

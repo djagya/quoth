@@ -171,28 +171,61 @@ Decisions still go through the chat (`review_claims` with the owner's reply).
 
 ## Recall (`/v1/prefetch`)
 
-For each turn the sidecar builds one `<quoth-recall>` block:
+For each turn the sidecar builds one `<quoth-recall>` block. Every budget, count and floor
+below lives in `quoth/recall_defaults.py`, and a test checks the numbers on this page
+against it.
 
 1. **Search text.** The owner's authored payload only: Hermes' sender tag, reply context
    and attachment captions are stripped, injected turns (scheduled deliveries, notices)
-   skip recall entirely, and the text is capped at 1,000 characters.
-2. **Claims.** Up to 6 accepted, current claims: meaning matches first (BGE-M3 cosine ≥ 0.5
-   over an in-memory index of accepted claims), then word matches.
-3. **Vault evidence.** The top 3 hits, if they are ready within `--evidence-budget`
-   (1.5 s). Otherwise the turn gets claims only (`evidence_status: slow`) while the search
-   finishes in the background and warms the caches; later turns skip evidence (`busy`)
-   instead of queueing behind it.
-4. **Lanes.** Up to 2 excerpts (240 characters) per enabled lane at or above its cosine
-   floor (0.62), from what is left of the evidence budget, excluding the current session.
-   The owner lane is on by default, the assistant lane off.
-5. **Relevance gate.** Off by default. With thresholds set, weak vault hits and claims are
-   dropped, and a turn with nothing relevant gets no vault section. An optional
+   skip recall entirely, and the text is capped at 1,000 characters. It is embedded once
+   per turn: the lanes, the vault search and the claim index share one query vector.
+2. **Candidates.** Each store ranks a pool: the 10 best vault hits by cosine; up to 12
+   accepted, current claims by meaning (BGE-M3 cosine ≥ 0.5 over an in-memory index of
+   accepted claims), then up to 12 by words that the meaning pass missed. A word match needs
+   at least one content word of the query (function words of en, ru, pt and de dropped,
+   words folded to a light stem) and ranks by the share of the query's content words it
+   holds, then newest first; meaning matches tie newest first too.
+3. **Gate before the cut.** The relevance gate judges every pool candidate on the text the
+   block would inject (a vault hit's 360-character excerpt), and the best that pass fill
+   the slots: up to 6 claims and the top 3 vault hits. A candidate that fails gives its slot
+   to the next one. The serving default is a vault cosine floor of 0.53 and a gap of at most
+   0.15 below the turn's top hit; claims are not gated by default. An optional
    cross-encoder can decide instead of cosine. Thresholds and how to choose them:
    [EVAL.md](EVAL.md#relevance-gate-and-eval-sweep).
+4. **Time budget.** Vault evidence and meaning-matched claims count only if ready within
+   `--evidence-budget` (1.5 s). Otherwise the turn gets word-matched claims only
+   (`evidence_status: slow`) while the search finishes in the background and warms the
+   caches; later turns skip evidence (`busy`) instead of queueing behind it.
+5. **Lanes.** Up to 2 excerpts (240 characters) per enabled lane at or above its cosine
+   floor (0.62), from what is left of the evidence budget, excluding the current session.
+   The owner lane is on by default, the assistant lane off.
 
-Injected claims are marked used (`use_count`, `last_used_at`), which orders the core block.
-Background work (lane ingest and embedding, claim indexing, review assist) yields to live
-turns.
+Shown vault evidence opens with a standing line: the excerpts are the closest notes found
+and may not answer the question. When the vault shows nothing, one line says why, so the
+model can tell a slow search from one that found nothing relevant:
+
+| Vault outcome | Line in the block |
+|---|---|
+| `slow` or `busy` | `Vault evidence: late (the note search did not finish in time this turn).` |
+| `unavailable` | `Vault evidence: unavailable this turn.` |
+| every candidate failed the gate | `Vault evidence: none above the relevance floor (no close note found).` |
+
+Injected claims, and only those (after the gate), are marked used (`use_count`,
+`last_used_at`), which orders the core block. Background work (lane ingest and embedding,
+claim indexing, review assist) yields to live turns.
+
+**Scores.** Every `score` in a dry run's `detail` and in the prefetch log is a BGE-M3 cosine
+rounded to 4 decimals, and floors compare that rounded value:
+
+| Store | `score` | Gate input |
+|---|---|---|
+| `vault` | cosine of the query and the chunk | `score`, its gap to the turn's top hit, `lexical`/`matched` on the injected excerpt, `rerank` |
+| `claims` | cosine in the claim index (none for a word-only match) | `gate_score` (the cosine when the claim is in the meaning pool, else none), `lexical`, `rerank` |
+| `owner`, `assistant` | cosine of the query and the message's best chunk | `score` against the lane floor |
+
+`rerank` (with a reranker) is a cross-encoder's sigmoid, 0..1. Each candidate also carries
+`pool` (the turn judged it for injection), `passed` and `gate` (the gate's decision and
+reason) and `injected` (it reached the block).
 
 ## Sidecar flags
 
@@ -213,6 +246,7 @@ Paths default under `$QUOTH_HOME`; the Hermes `state.db` under `$HERMES_HOME`.
 | `--evidence-budget S` | 1.5 | how long prefetch waits for vault evidence |
 | `--episodes PATH` | off | assistant lane DB (e.g. `$QUOTH_HOME/episodes.db`) |
 | `--episodes-prefetch on\|off` | `off` | inject the assistant's earlier words into recall |
+| `--assistant-min-score X` | 0.62 | cosine floor for assistant-lane excerpts |
 | `--episodes-max-age-days N` | all | embed only replies newer than N days |
 | `--owner-episodes PATH` | off | owner lane DB (e.g. `$QUOTH_HOME/owner-episodes.db`) |
 | `--owner-prefetch on\|off` | `on` | inject the owner's earlier words into recall |
@@ -221,8 +255,14 @@ Paths default under `$QUOTH_HOME`; the Hermes `state.db` under `$HERMES_HOME`.
 | `--episodes-tick-seconds S` | 60 | CPU budget of one lane tick |
 | `--prefetch-log DIR` | off | record-only JSON line per turn and per search tool call: hashes, ids, locators, scores and timings, never the query or excerpt text ([EVAL.md](EVAL.md#online-measurement-the-prefetch-log)); on in the [s6 template](../deploy/s6/quoth-sidecar/run) under `$QUOTH_HOME/prefetch-log` |
 | `--prefetch-log-days N` | 30 | prune log files older than N days |
-| `--vault-min-cosine`, `--vault-max-gap`, `--vault-lexical-rescue`, `--claims-min-cosine`, `--claims-min-lexical` | off | relevance gate |
-| `--rerank-model`, `--rerank-budget`, `--rerank-claims`, `--rerank-max-tokens`, `--vault-min-rerank`, `--vault-max-rerank-gap`, `--vault-rerank-widen`, `--claims-min-rerank` | off | cross-encoder reranker |
+| `--vault-min-cosine X\|off` | 0.53 | relevance gate: vault cosine floor |
+| `--vault-max-gap X\|off` | 0.15 | relevance gate: most a vault hit may sit below the turn's top hit |
+| `--vault-lexical-rescue`, `--claims-min-cosine`, `--claims-min-lexical` | off | further relevance-gate rules (`off` turns any gate rule off) |
+| `--rerank-model NAME` | off | cross-encoder reranker |
+| `--rerank-budget S` | 0.8 | seconds a turn's reranking may take |
+| `--rerank-max-tokens N` | 192 | query + passage tokens per pair |
+| `--rerank-claims` | off | also score the claim pool |
+| `--vault-min-rerank`, `--vault-max-rerank-gap`, `--vault-rerank-widen`, `--claims-min-rerank` | off | rerank rules (need `--rerank-model`) |
 
 Embedding threads follow the container's CPU quota (cgroup `cpu.max`) minus headroom;
 `QUOTH_EMBED_THREADS=N` overrides.
@@ -266,7 +306,7 @@ Integer fields are clamped to their range (`max(lo, min(n, hi))`); for example `
 ### `/v1/health`
 
 ```json
-{"ok": true, "schema": "quoth-sidecar/v1", "version": "0.15.0", "status": "green",
+{"ok": true, "schema": "quoth-sidecar/v1", "version": "0.16.0", "status": "green",
  "ledger": {"status": "green", "reasons": [], "pending": 2, "accepted_current": 10,
             "oldest_pending_age_days": 0.0},
  "evidence": {"status": "ok", "state": "admitted", "snapshot_id": "<sha256>", "pointer": true,
@@ -337,8 +377,8 @@ meanwhile.
 | `query` | – | the incoming message |
 | `session_id` | `""` | the calling session (excluded from lane hits) |
 | `dry_run` | false | score without marking claims used; adds `detail` (claims, evidence, candidates, status, timings) |
-| `k_evidence` | 3 | vault hits served (0–20) |
-| `k_claims` | 6 | claims served (1–20) |
+| `k_evidence` | 3 | vault hits injected (0–20) |
+| `k_claims` | 6 | claims injected (1–20) |
 | `k_candidates` | 0 | dry run only: deeper candidate lists per store (0–20) |
 | `evidence_budget`, `rerank_budget` | sidecar's | dry run only, seconds, capped at 120 |
 

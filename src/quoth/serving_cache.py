@@ -20,6 +20,7 @@ from .cpu import embed_threads
 from .dated import date_index
 from .embed.backends import get_embedder
 from .embed.store import load_matrix
+from .recall_defaults import QUERY_EMBED_WAIT
 
 _MAX_CONNS = 8
 _STATE: dict = {}
@@ -78,14 +79,22 @@ def rank(ids: np.ndarray, mat: np.ndarray, q: np.ndarray, limit: int) -> list[tu
 
 
 class QueryEmbedder:
-    """Per-server embedders (loaded once, serialized per model) and a bounded query-vector LRU."""
+    """Per-server embedders (loaded once, serialized per model) and a bounded query-vector LRU.
 
-    def __init__(self, maxsize: int = 256):
+    The LRU is single-flight per (model, query): when a turn's lanes and its evidence job ask
+    for the same cold query at once, one embeds and the others wait for its vector, so a turn
+    embeds its query once. A waiter that gives up (`wait` seconds) or whose leader failed
+    embeds the query itself.
+    """
+
+    def __init__(self, maxsize: int = 256, wait: float = QUERY_EMBED_WAIT):
         self.maxsize = maxsize
+        self.wait = wait
         self._embedders: dict = {}
         self._locks: dict = {}
         self._lock = threading.Lock()
         self._vectors: OrderedDict = OrderedDict()
+        self._flights: dict = {}  # (model, query) -> Event set when the leader's embed ends
 
     def embedder(self, model: str):
         # Failures are never cached: every call retries and raises as before.
@@ -106,15 +115,42 @@ class QueryEmbedder:
             self._embedders[model] = embedder
 
     def vector(self, model: str, embedder, query: str, *, cache: bool = True) -> np.ndarray:
-        """Query vector, LRU-cached; `cache=False` (bulk callers) neither reads nor fills the LRU."""
+        """Query vector, LRU-cached and single-flight; `cache=False` (bulk callers) neither
+        reads nor fills the LRU."""
         if not cache:
             return np.array(embedder.embed_query(query), dtype=np.float32)
         key = (model, query)
         with self._lock:
-            hit = self._vectors.get(key)
+            hit = self._get(key)
             if hit is not None:
-                self._vectors.move_to_end(key)
                 return hit
+            flight = self._flights.get(key)
+            leader = flight is None
+            if leader:
+                flight = self._flights[key] = threading.Event()
+        if not leader:
+            if flight.wait(self.wait):
+                with self._lock:
+                    hit = self._get(key)
+                if hit is not None:
+                    return hit
+            return self._embed(key, embedder, query)  # the leader is late or failed
+        try:
+            return self._embed(key, embedder, query)
+        finally:
+            with self._lock:
+                if self._flights.get(key) is flight:
+                    del self._flights[key]
+            flight.set()
+
+    def _get(self, key):
+        """Cached vector or None; call under `_lock`."""
+        hit = self._vectors.get(key)
+        if hit is not None:
+            self._vectors.move_to_end(key)
+        return hit
+
+    def _embed(self, key, embedder, query: str) -> np.ndarray:
         q = np.array(embedder.embed_query(query), dtype=np.float32)
         q.flags.writeable = False
         with self._lock:

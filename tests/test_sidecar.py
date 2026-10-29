@@ -16,7 +16,7 @@ import types
 
 import pytest
 
-from quoth import hermes_install, sidecar
+from quoth import relevance, hermes_install, sidecar
 from quoth.db import open_db
 from quoth.embed.backends import get_embedder
 from quoth.embed.store import embed_chunks
@@ -74,9 +74,10 @@ def snapshot_db(vault, db_path):
 def served(tmp_path, state_db, snapshot_db):
     # AF_UNIX paths are capped near 104 bytes on macOS; pytest's tmp_path is too long.
     short = Path(tempfile.mkdtemp(prefix="mn"))
+    # hash-ngram cosines sit under the serving gate's bge-m3 floor: no gate here.
     app = sidecar.Quoth(ledger_path=tmp_path / "ledger.db", state_db=state_db,
                             evidence=ReadOnlyEvidence(ServingSnapshot(str(snapshot_db))),
-                            model="hash-ngram")
+                            model="hash-ngram", gate=relevance.Gate())
     server = sidecar.SidecarServer(short / "s.sock", app)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -324,9 +325,12 @@ def test_prefetch_answers_with_claims_when_evidence_is_slow(tmp_path, state_db):
         first = app.prefetch({"query": "where does Alex live Quendorf"})
         assert first["evidence_status"] == "slow" and first["claims"] == 1
         assert "lives in Quendorf" in first["text"] and "slow hit" not in first["text"]
+        # The model is told the vault was late, not that nothing was found.
+        assert sidecar.VAULT_NOTES["late"] in first["text"]
         # Still running: the next turn skips evidence instead of queueing behind it.
         second = app.prefetch({"query": "Quendorf"})
         assert second["evidence_status"] == "busy" and slow.calls == 1
+        assert sidecar.VAULT_NOTES["late"] in second["text"]
         slow.release.set()
         for _ in range(100):
             if app._evidence_future.done():
@@ -334,6 +338,7 @@ def test_prefetch_answers_with_claims_when_evidence_is_slow(tmp_path, state_db):
             threading.Event().wait(0.02)
         third = app.prefetch({"query": "Quendorf again"})
         assert third["evidence_status"] == "ok" and "slow hit" in third["text"]
+        assert "Vault evidence:" not in third["text"] and sidecar.VAULT_HINT in third["text"]
     finally:
         slow.release.set()
         app.close()
@@ -416,7 +421,7 @@ def test_dense_claim_recall_finds_meaning_without_shared_words(provider, served)
     while app.sync_claims():
         pass
     assert len(app.claim_index) == 1
-    query = "Quendorfish neighbourhoods"
+    query = "Uendorfian neighbourhoods"  # no shared word stem, close in characters
     with app.lock:
         assert core.recall(app.conn, query) == []  # no shared word
     app.claim_index.min_similarity = 0.2  # hash-ngram test vectors are coarser than bge-m3

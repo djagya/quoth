@@ -775,13 +775,22 @@ def review_queue(conn, limit: int = 20, *, suggested: bool | None = None, offset
 
 
 def recall(conn, query: str, k: int = 5, *, mark_used: bool = False, now: str | None = None) -> list[dict]:
-    """Accepted current claims ranked by term overlap; pending claims are never served."""
-    terms = _tokens(query)
+    """Accepted current claims that share a content word with the query, best first.
+
+    The relevance gate's lexical measure (`relevance.terms`: casefolded, function words of
+    en/ru/pt/de dropped, light stems): a claim needs at least one of the query's content
+    words and ranks by the share it holds (coverage), then newest first. A query of function
+    words only matches nothing. Pending claims are never served.
+    """
+    from ..relevance import overlap, terms
+    query_terms = terms(query)
+    if not query_terms:
+        return []
     scored = []
     for row in conn.execute(f"SELECT * FROM claims WHERE review_status = 'accepted' AND {_CURRENT}"):
-        overlap = len(terms & _tokens(row["text"]))
-        if overlap:
-            scored.append((overlap, row["id"], row))
+        share, matched = overlap(query_terms, row["text"])
+        if matched:
+            scored.append((share, row["id"], row))
     scored.sort(key=lambda x: (-x[0], -x[1]))
     hits = [_view(r) for _, _, r in scored[:k]]
     if mark_used:

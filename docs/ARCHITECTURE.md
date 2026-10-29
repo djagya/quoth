@@ -19,7 +19,7 @@ Everything runs locally on CPU. Nothing listens on the network.
 | Nightly refresh | `nightly.py`, `quality.py`, `heartbeat.py`, `gold_drift.py` | Builds a successor when the vault changed, scores it against the serving snapshot, switches the pointer only when it passes, writes receipts and a heartbeat |
 | Ledger | `ledger/` | Typed claims with origin and authority, write-time reconcile, owner review, bitemporal history, core-block compile |
 | Episode lanes | `episodes.py` | Two searchable records of earlier chats: what the assistant said, and what the owner wrote |
-| Sidecar | `sidecar.py`, `relevance.py`, `rerank.py`, `claim_index.py`, `prefetch_log.py` | The long-running process: loads the model once and serves core, recall, evidence, review and lanes over a Unix socket |
+| Sidecar | `sidecar.py`, `recall_defaults.py`, `relevance.py`, `rerank.py`, `claim_index.py`, `prefetch_log.py` | The long-running process: loads the model once and serves core, recall, evidence, review and lanes over a Unix socket |
 | Hermes plugin | `hermes_plugin/quoth/` | A stdlib-only memory provider for the Hermes agent that talks to the sidecar |
 | WebUI panel | `control/`, `web/control-surface/` | Read-only memory views for the Hermes WebUI: overview, ledger, review queue, core, recall playground, episodes, refresh history |
 | MCP server | `mcp_server.py` | `quoth mcp`: one read-only tool, `evidence_bundle`, over stdio |
@@ -49,9 +49,13 @@ flowchart LR
 3. The serving path opens the snapshot read-only. `quoth mcp` and the sidecar both use
    `evidence_service.py`, so the MCP tool and the sidecar's `/v1/evidence` return the
    same bytes.
-4. On each owner turn, the plugin asks the sidecar for recall (`/v1/prefetch`): accepted
-   claims, the top vault hits and, optionally, excerpts from the lanes. The sidecar
-   formats them as one `<quoth-recall>` block.
+4. On each owner turn, the plugin asks the sidecar for recall (`/v1/prefetch`). The
+   sidecar embeds the query once, ranks a pool of candidates per store (accepted claims by
+   meaning and by words, vault hits, optionally the lanes), judges each candidate with the
+   relevance gate on the text it would inject, and fills the slots with the best that pass.
+   It formats them as one `<quoth-recall>` block, with one line saying why when the vault
+   shows nothing (late, unavailable, nothing above the floor). Every budget, count and floor
+   of this path lives in `recall_defaults.py`.
 5. When the assistant wants to keep something, it proposes a claim. The claim stays
    pending until the owner accepts it in chat, unless a narrow auto-accept rule holds.
 6. `quoth ledger compile-core --publish` writes the accepted claims as the core block
@@ -118,7 +122,13 @@ with `authority: none` and are off in recall by default.
 **One process owns the model.** The sidecar loads BGE-M3 once and shares it between vault
 evidence, claim ranking and both lanes. The agent's gateway stays stdlib-only. Background
 work (lane embedding, claim indexing) yields to live turns, and a turn waits for evidence
-at most 1.5 seconds before answering with claims only.
+at most 1.5 seconds before answering with word-matched claims only.
+
+**One decision path for recall.** One module (`recall_defaults.py`) holds every budget,
+count, cap and floor; one lexical measure (`relevance.terms`: stopword-free, lightly stemmed,
+Russian included) selects word-matched claims and feeds the gate; the gate runs before the
+cut, on the injected text, so a dropped slot refills; and the eval harness replays the same
+functions, so a threshold chosen offline behaves the same live.
 
 **Measure on the served path.** The eval harness scores the same dry-run prefetch the
 assistant receives, and the nightly gate scores both snapshots with the same harness, so

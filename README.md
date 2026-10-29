@@ -211,9 +211,9 @@ status tokens only.
   refresh, its gate, daily quality and heartbeat.
 - `src/quoth/ledger/`: the core-memory ledger, its review rules and migrations.
 - `src/quoth/episodes.py`: the assistant and owner episode lanes.
-- `src/quoth/sidecar.py`, `relevance.py`, `rerank.py`, `claim_index.py`,
-  `prefetch_log.py`: the sidecar, the relevance gate, the reranker, claim ranking, the
-  prefetch log.
+- `src/quoth/sidecar.py`, `recall_defaults.py`, `relevance.py`, `rerank.py`, `claim_index.py`,
+  `prefetch_log.py`: the sidecar, every recall budget and floor, the relevance gate, the
+  reranker, claim ranking, the prefetch log.
 - `src/quoth/health.py`, `hermes_install.py`: `quoth health`, `quoth hermes-plugin`.
 - `src/quoth/control/`: the WebUI panel's backend.
 - `src/quoth/evals/`: eval set v1, converters, harness, receipts, compare, sweep, online
