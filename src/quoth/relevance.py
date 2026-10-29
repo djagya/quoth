@@ -1,9 +1,9 @@
-"""Relevance gate for prefetch injection: what serving would inject must also clear a bar.
+"""Relevance gate and lexical measure for prefetch injection.
 
-Retrieval and candidate lists are unchanged. The gate only decides which of the items a
-turn would inject (the top ``k_evidence`` vault hits, the served claims) reach the recall
-block, so a turn with nothing relevant injects nothing. It reads signals already at hand
-when evidence returns, no extra model or index call:
+Retrieval and candidate lists are unchanged. The gate decides which of a turn's candidates
+(its vault pool, its claim pool) reach the recall block, so a turn with nothing relevant
+injects nothing. It reads signals already at hand when evidence returns, no extra model or
+index call:
 
 - ``cosine``: the dense similarity the store ranked by (bge-m3, normalised vectors);
 - ``gap``: how far a vault hit's cosine sits below the turn's top vault hit;
@@ -14,15 +14,23 @@ when evidence returns, no extra model or index call:
   the rerank thresholds decide those hits instead of the cosine ones; where it is missing
   (model loading or unavailable, over its time budget) the cosine gate applies.
 
-Every threshold is off by default: every item then passes with reason ``off`` and the
-recall block is exactly what it was without the gate. `quoth eval sweep` replays the same
-`Gate` on recorded signals, so a threshold chosen offline behaves the same on the sidecar.
+What is judged is what is injected: a vault hit's lexical coverage and rerank score are
+taken on `vault_text`, the same whitespace-folded, VAULT_SNIPPET-character excerpt the recall
+block shows. A turn judges every candidate in its pool and injects the best that pass
+(`vault_pick`), so a dropped slot is refilled by the next candidate.
+
+`Gate()` has every threshold off (every item passes with reason ``off``); `default_gate()`
+holds the serving defaults (`recall_defaults.GATE`), which the sidecar and `eval run` start
+from. `quoth eval sweep` replays the same `Gate` on recorded signals, so a threshold chosen
+offline behaves the same on the sidecar.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
 import re
 import unicodedata
+
+from . import recall_defaults as D
 
 _WORD = re.compile(r"\w+", re.UNICODE)
 # Words compare by a light stem: one inflection ending stripped, then the first STEM letters.
@@ -46,6 +54,11 @@ under above below between after before during while because until been being
 мне меня мой моя моё мои так уже все всё ещё еще про при над под без чем кто нас вас вам нам
 тебя тебе себя свой своя свои какой какая какое какие сколько почему зачем если чтобы только
 очень тоже также надо нужно можно будет было
+который которая которое которые которого которой котором которую которых которым
+этого этому этим этой этом эту того тому тем том тех теми весь вся всего всей всем всех
+наш наша наше наши нашего нашей ваш ваша ваше ваши мной тобой ему ней нее неё них ним ними
+чего чему сейчас потом теперь тогда даже вот вообще ведь быть буду будешь будем будут
+нет либо куда откуда сам сама сами самый хочу хочет может могу
 que para com uma uns umas como onde quando qual quais por pelo pela pelos pelas sobre mas não
 isso isto este esta esse essa aquele aquela meu minha meus minhas você vocês ele ela eles elas
 foi ser são tem têm está estão seu sua seus suas dos das nos nas num numa
@@ -96,6 +109,12 @@ def overlap(query_terms: frozenset[str], text: str) -> tuple[float | None, int]:
 
 def coverage(query_terms: frozenset[str], text: str) -> float | None:
     return overlap(query_terms, text)[0]
+
+
+def vault_text(hit: dict) -> str:
+    """The excerpt of a vault hit the recall block injects, and the text the gate and the
+    reranker judge: whitespace folded, cut to VAULT_SNIPPET characters."""
+    return " ".join(str(hit.get("text") or "").split())[:D.VAULT_SNIPPET]
 
 
 @dataclass(frozen=True)
@@ -178,7 +197,7 @@ class Gate:
         return True, "cosine"
 
     def claim(self, cosine: float | None, lexical: float | None, rerank: float | None = None) -> tuple[bool, str]:
-        """(passes, reason) for one served claim; `cosine` is None for a word-only match,
+        """(passes, reason) for one candidate claim; `cosine` is None for a word-only match,
         `rerank` its rerank score when scored (then it alone decides, at `claims_min_rerank`)."""
         if self.claims_min_rerank is not None and rerank is not None:
             return (True, "rerank") if rerank >= self.claims_min_rerank else (False, "rerank_floor")
@@ -217,32 +236,50 @@ class Gate:
 
 
 RERANK_FIELDS = ("vault_min_rerank", "vault_max_rerank_gap", "vault_rerank_widen", "claims_min_rerank")
-MAX_WIDEN = 20  # sidecar.MAX_CANDIDATES: the deepest vault list a turn can retrieve
+MAX_WIDEN = D.MAX_WIDEN
+
+
+def default_gate() -> Gate:
+    """The serving defaults (`recall_defaults.GATE`): what `quoth sidecar` and `eval run` gate with."""
+    return Gate(**D.GATE)
+
+
+def _threshold(kind):
+    """argparse type: a number, or `off` (also `none`) for that check off."""
+    def parse(raw: str):
+        if raw.strip().lower() in ("off", "none"):
+            return None
+        return kind(raw)
+    parse.__name__ = kind.__name__
+    return parse
+
+
+def _default(name: str) -> str:
+    value = D.GATE[name]
+    return "off" if value is None else f"{value:g}"
 
 
 def add_arguments(parser) -> None:
-    """The gate's flags, shared by `quoth sidecar` and `quoth eval run`."""
-    parser.add_argument("--vault-min-cosine", type=float, default=None,
-                        help="relevance gate: inject a vault hit only at or above this cosine (default off)")
-    parser.add_argument("--vault-max-gap", type=float, default=None,
-                        help="relevance gate: drop vault hits more than this cosine below the turn's top hit")
-    parser.add_argument("--vault-lexical-rescue", type=float, default=None,
-                        help="relevance gate: a vault hit holding this share of the query's words (2 or more)"
-                             " passes the floor and gap anyway; needs one of them")
-    parser.add_argument("--claims-min-cosine", type=float, default=None,
-                        help="relevance gate: inject a meaning-matched claim only at or above this cosine")
-    parser.add_argument("--claims-min-lexical", type=float, default=None,
-                        help="relevance gate: inject a word-matched claim only at this share of the query's words")
-    parser.add_argument("--vault-min-rerank", type=float, default=None,
-                        help="relevance gate: inject a vault hit only at or above this rerank score (needs"
-                             " --rerank-model; replaces the cosine rules on turns whose hits are scored)")
-    parser.add_argument("--vault-max-rerank-gap", type=float, default=None,
-                        help="relevance gate: drop vault hits more than this rerank score below the turn's best")
-    parser.add_argument("--vault-rerank-widen", type=int, default=None,
-                        help="rerank the top N vault hits by cosine and serve the best 3 by rerank score"
-                             " (default off: rerank the 3 served hits, keep cosine order)")
-    parser.add_argument("--claims-min-rerank", type=float, default=None,
-                        help="relevance gate: inject a meaning-matched claim only at or above this rerank score")
+    """The gate's flags, shared by `quoth sidecar` and `quoth eval run`. Each defaults to
+    `recall_defaults.GATE`; `off` turns that check off."""
+    rules = (
+        ("vault_min_cosine", float, "inject a vault hit only at or above this cosine"),
+        ("vault_max_gap", float, "drop vault hits more than this cosine below the turn's top hit"),
+        ("vault_lexical_rescue", float, "a vault hit holding this share of the query's words (2 or more)"
+                                        " passes the floor and gap anyway; needs one of them"),
+        ("claims_min_cosine", float, "inject a meaning-matched claim only at or above this cosine"),
+        ("claims_min_lexical", float, "inject a word-matched claim only at this share of the query's words"),
+        ("vault_min_rerank", float, "inject a vault hit only at or above this rerank score (needs"
+                                    " --rerank-model; replaces the cosine rules on turns whose hits are scored)"),
+        ("vault_max_rerank_gap", float, "drop vault hits more than this rerank score below the turn's best"),
+        ("vault_rerank_widen", int, f"rerank the top N vault hits by cosine and serve the best"
+                                    f" {D.PREFETCH_EVIDENCE} by rerank score (off: rerank the"
+                                    f" {D.PREFETCH_EVIDENCE} served hits, keep cosine order)"),
+        ("claims_min_rerank", float, "inject a meaning-matched claim only at or above this rerank score"),
+    )
+    for name, kind, text in rules:
+        parser.add_argument("--" + name.replace("_", "-"), type=_threshold(kind), default=D.GATE[name],
+                            metavar="X|off", help=f"relevance gate: {text} (default {_default(name)})")
 
 
 def from_args(args, parser=None) -> Gate:
@@ -262,7 +299,7 @@ def judge_vault(gate: Gate, query_terms: frozenset[str], hits: list[dict], k: in
     where unscored: a reranker is loaded) each entry also carries its `rerank` score."""
     out = []
     for h in hits:
-        lexical, matched = overlap(query_terms, h.get("text") or "")
+        lexical, matched = overlap(query_terms, vault_text(h))
         out.append({"lexical": lexical, "matched": matched})
     signals = [{"cosine": h.get("cosine"), "lexical": j["lexical"], "matched": j["matched"]}
                for h, j in zip(hits, out)]
@@ -294,18 +331,25 @@ def decide_vault(gate: Gate, items: list[dict], k: int, rerank: list | None = No
             for i, it in enumerate(items)]
 
 
-def vault_order(gate: Gate, n: int, k: int, rerank: list | None = None) -> list[int]:
-    """Indices of the hits serving would inject before the gate, in block order: the top
-    `k` by cosine, or with a widen and scored hits, the best `k` of the top N by rerank."""
-    if gate.vault_rerank_widen is not None and rerank_usable(gate, rerank, n, k):
+def vault_pick(gate: Gate, passed: list[bool], pool: int, k: int, rerank: list | None = None) -> list[int]:
+    """Indices of the vault hits a turn injects, in block order: the first `k` that pass
+    among the turn's candidates (gate before the cut). The candidates are the `pool` best by
+    cosine; when rerank rules apply (every hit the turn reranks is scored) only the reranked
+    hits, in cosine order, or with a widen by rerank score, since an unscored hit was never
+    judged by the rules that decide this turn."""
+    n = len(passed)
+    if rerank_usable(gate, rerank, n, k):
         depth = min(gate.rerank_depth(k), n)
-        return sorted(range(depth), key=lambda i: (-rerank[i], i))[:k]
-    return list(range(min(k, n)))
+        order = (sorted(range(depth), key=lambda i: (-rerank[i], i)) if gate.vault_rerank_widen is not None
+                 else list(range(depth)))
+    else:
+        order = list(range(min(pool, n)))
+    return [i for i in order if passed[i]][:k]
 
 
 def judge_claim(gate: Gate, query_terms: frozenset[str], claim: dict, cosine: float | None,
                 rerank: float | None = None, scored: bool = False) -> dict:
-    """`cosine` is the claim's score in the serving dense list (None: a word-only match),
+    """`cosine` is the claim's score in the turn's dense pool (None: a word-only match),
     kept as `gate_score` so a replay judges the same input whatever the candidate depth.
     `scored` (claims are reranked): the entry also carries `rerank` (None: not scored)."""
     lexical = coverage(query_terms, claim.get("text") or "")

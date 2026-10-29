@@ -38,6 +38,7 @@ import time
 import numpy as np
 
 from . import paths
+from . import recall_defaults as D
 from .ledger.authored import (ALLOWED_SOURCES, SYNTHETIC_PREFIXES, _authored_payload, _clean_text,
                               _synthetic_reason, _transport_text, injected_sql, not_injected_sql)
 from .redact import redact
@@ -72,7 +73,7 @@ WORKER_TICK_LIMIT = 4096  # background ticks: EMBED_TICK_SECONDS is the real bou
 # Cumulative ingest counters kept in episode_state as total:<name> (counts only, no content).
 TOTAL_COUNTERS = ("added", "skipped", "duplicates", "injected")
 EMBED_SUB_BATCH = 4  # small, so a live query never waits long behind a background batch
-EMBED_TICK_SECONDS = 60.0  # CPU budget of one background tick
+EMBED_TICK_SECONDS = D.EPISODES_TICK_SECONDS  # CPU budget of one background tick
 # Lanes share one embedding model and the CPU: their background ticks run one at a time.
 TICK_LOCK = threading.Lock()
 # Set while someone else (the review assist) waits for TICK_LOCK: a running tick stops at
@@ -521,7 +522,9 @@ class Episodes:
             seen: set[int] = set()
             with self.lock:
                 for i in order:
-                    score = float(sims[i])
+                    # The floor compares the score as reported (4 decimals), so a live search
+                    # and a dry run's floor over the same hits agree.
+                    score = round(float(sims[i]), 4)
                     if min_score is not None and score < min_score:
                         break
                     row = self.conn.execute(
@@ -537,7 +540,7 @@ class Episodes:
                         "origin": origin, "authority": authority,
                         "locator": f"hermes:{row['session_id']}:{row['message_id']}",
                         "session_id": row["session_id"], "message_id": row["message_id"],
-                        "timestamp": _iso(row["ts"]), "score": round(score, 4), "text": row["text"]})
+                        "timestamp": _iso(row["ts"]), "score": score, "text": row["text"]})
                     if len(hits) >= k:
                         break
         return {"origin": origin, "answer_use": answer_use, "model": self.model, "hits": hits}
@@ -605,7 +608,7 @@ def _wait_quiet(busy, max_wait: float = YIELD_WAIT_SECONDS, poll: float = 0.5) -
 class EpisodeWorker:
     """Daemon thread: `Episodes.tick` every `interval` seconds until stopped."""
 
-    def __init__(self, episodes: Episodes, state_db, interval: float = 300.0,
+    def __init__(self, episodes: Episodes, state_db, interval: float = D.EPISODES_INTERVAL,
                  limit: int = WORKER_TICK_LIMIT, yield_to=None, tick_seconds: float = EMBED_TICK_SECONDS):
         self.episodes = episodes
         self.tick_seconds = tick_seconds
@@ -681,7 +684,8 @@ def main(argv=None) -> int:
     ps.add_argument("-k", "--top-k", dest="k", type=int, default=5, help="hits to return (1-20)")
     sub.add_parser("stats", help="counts, watermark, last background tick")
     ph = sub.add_parser("health", help="exit 1 when the background tick is stale or failing")
-    ph.add_argument("--interval", type=float, default=300.0, help="the sidecar's --episodes-interval")
+    ph.add_argument("--interval", type=float, default=D.EPISODES_INTERVAL,
+                    help="the sidecar's --episodes-interval")
     args = p.parse_args(argv)
 
     eps = Episodes(args.episodes, model=args.model, max_age_days=args.max_age_days, role=args.role)

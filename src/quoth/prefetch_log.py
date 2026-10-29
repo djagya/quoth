@@ -4,7 +4,9 @@ Off unless the sidecar gets ``--prefetch-log DIR``. Each line holds hashes, ids,
 locators, scores, statuses and timings, never the query or any excerpt text:
 
 - ``{"type": "prefetch", "ts", "v", "session", "query_sha256", "query_len",
-  "stores": {store: [{"id"|"locator", "score", "injected"}]}, "status", "ms"}``
+  "stores": {store: [{"id"|"locator", "score", "pool", "passed", "gate", "injected", ...}]},
+  "status", "ms"}``: per candidate, ``pool`` (the turn judged it for injection), ``passed``
+  (it cleared the relevance gate) and ``injected`` (it reached the recall block)
 - ``{"type": "tool", "ts", "v", "tool", "session", "k", "results": [locator, ...]}``
 
 Locators can contain vault paths, so the log is private and stays on the host. Writes go
@@ -24,11 +26,13 @@ import queue
 import re
 import threading
 
+from .recall_defaults import PREFETCH_LOG_DAYS
+
 log = logging.getLogger(__name__)
 
 SCHEMA = "quoth-prefetch-log/1"
 FILE_RE = re.compile(r"^prefetch-(\d{4}-\d{2}-\d{2})\.jsonl$")
-DEFAULT_DAYS = 30
+DEFAULT_DAYS = PREFETCH_LOG_DAYS
 QUEUE_MAX = 2000
 
 

@@ -10,8 +10,10 @@ import threading
 
 import numpy as np
 
+from .recall_defaults import CLAIM_INDEX_MIN_SIMILARITY
+
 # Cosine floor for a claim to count as relevant to a turn (bge-m3, normalised vectors).
-MIN_SIMILARITY = 0.5
+MIN_SIMILARITY = CLAIM_INDEX_MIN_SIMILARITY
 SYNC_BATCH = 32
 
 
@@ -80,10 +82,11 @@ class ClaimIndex:
             return self._matrix
 
     def rank(self, query_vector: np.ndarray, k: int) -> list[tuple[int, float]]:
-        """[(claim_id, cosine)] best first, at or above the similarity floor; ties by id."""
+        """[(claim_id, cosine)] best first, at or above the similarity floor; ties newest
+        first (higher id), as lexical recall breaks them."""
         ids, mat = self.matrix()
         if ids.size == 0 or k <= 0:
             return []
         sims = mat @ np.asarray(query_vector, dtype=np.float32)
-        order = np.lexsort((ids, -sims))
+        order = np.lexsort((-ids, -sims))
         return [(int(ids[i]), float(sims[i])) for i in order[:k] if sims[i] >= self.min_similarity]
