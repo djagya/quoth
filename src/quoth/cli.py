@@ -131,8 +131,8 @@ def _cmd_refresh(a) -> int:
 def _cmd_snapshot(a) -> int:
     from .refresh import snapshot
     try:
-        result = snapshot(Path(a.target), Path(a.vault), retries=a.retries, threads=a.threads,
-                          batch_size=a.batch_size)
+        result = snapshot(Path(a.target), Path(a.vault), resume=a.resume, retries=a.retries,
+                          threads=a.threads, batch_size=a.batch_size)
     except (OSError, ValueError, RuntimeError, sqlite3.Error, json.JSONDecodeError) as e:
         return _fail("snapshot", e)
     print(json.dumps(result, ensure_ascii=False))
@@ -230,6 +230,8 @@ def build_parser() -> argparse.ArgumentParser:
                                           " prints the receipt as JSON")
     psn.add_argument("--target", required=True, help="new output DB; must not exist yet")
     psn.add_argument("--vault", required=True, help="vault directory")
+    psn.add_argument("--resume", action="store_true",
+                     help="continue this exact interrupted build from its checkpoint")
     psn.add_argument("--retries", type=int, default=2, help="embedding retries (default 2)")
     _embed_args(psn)
     psn.set_defaults(func=_cmd_snapshot)

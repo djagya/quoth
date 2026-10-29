@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .db import connect_read_only, list_migrations, open_db, validate_evidence_db
@@ -14,11 +15,13 @@ from .embed.backends import MODELS, get_embedder
 from .embed.store import embed_chunks
 from .ingest import ingest_vault
 from .assets import eval_path
-from .scopes import load_config
+from .scopes import SCOPES
+from .vault import IgnoreRules, frontmatter_excluded, ignore_rules_sha256, walk
 
 # Every snapshot manifest carries the digests of each ingestion/embedding contract file.
 CODE_FILES = ("chunker.py", "db.py", "dense.py", "embed/backends.py", "embed/store.py",
-              "entities.py", "ingest.py", "scopes.py", "scopes.toml", "search.py")
+              "entities.py", "ingest.py", "links.py", "scopes.py", "scopes.toml", "search.py",
+              "vault.py")
 SCOPE_CONTRACT_FILES = frozenset(("scopes.py", "scopes.toml"))
 SERVING_CONTRACT_FILES = frozenset(("search.py",))
 # Index-contract files whose changes an operator may explicitly declare to preserve
@@ -79,29 +82,26 @@ def validate_code_compatibility(source_manifest: dict, current: dict[str, str],
 
 
 def inventory(vault: Path) -> dict[str, str]:
+    """{path: sha256} of every note that would be indexed, by the rules ingest applies.
+
+    An unreadable folder or a non-regular note raises: a partial scan must never be
+    mistaken for deleted notes or a complete fresh inventory.
+    """
     if not vault.is_dir():
         raise ValueError(f"vault directory not found: {vault}")
     result = {}
-
-    def unreadable(error):
-        raise error
-
-    # os.walk's default silently skips unreadable directories. A partial scan
-    # must never be mistaken for deleted notes or a complete fresh inventory.
-    cfg = load_config()
-    for root, dirs, names in os.walk(vault, followlinks=False, onerror=unreadable):
-        # Match ingest's non-following traversal: directory symlinks are not
-        # part of the allowed inventory, and must not be read through.
-        dirs[:] = sorted(name for name in dirs if not cfg.skip_dir(name)
-                         and not (Path(root) / name).is_symlink())
-        for name in sorted(names):
-            if not cfg.is_note(name):
-                continue
-            path = Path(root) / name
-            if path.is_symlink() or not path.is_file():
-                raise ValueError("non-regular vault note is not supported")
-            result[path.relative_to(vault).as_posix()] = sha(path)
+    for entry in walk(vault, IgnoreRules.load(vault), strict=True):
+        if entry.excluded:
+            continue
+        raw = entry.path.read_bytes()
+        if not frontmatter_excluded(raw):
+            result[entry.rel] = hashlib.sha256(raw).hexdigest()
     return result
+
+
+def vault_state(vault: Path) -> tuple[dict[str, str], str | None]:
+    """The inventory and the ``.quothignore`` digest: both define what a snapshot holds."""
+    return inventory(vault), ignore_rules_sha256(vault)
 
 
 def db_inventory(conn) -> dict[str, str]:
@@ -121,7 +121,8 @@ def validate(conn, expected: dict[str, str] | None = None) -> dict[str, int]:
     validate_evidence_db(conn)
     if conn.execute("SELECT 1 FROM embeddings WHERE model!='bge-m3' LIMIT 1").fetchone():
         raise ValueError("unexpected embedding model")
-    if conn.execute("SELECT 1 FROM sources WHERE scope NOT IN ('general', 'work') LIMIT 1").fetchone():
+    if conn.execute(f"SELECT 1 FROM sources WHERE scope NOT IN ({','.join('?' * len(SCOPES))})"
+                    " LIMIT 1", SCOPES).fetchone():
         raise ValueError("invalid vault scope")
     if expected is not None and db_inventory(conn) != expected:
         raise ValueError("vault inventory differs from current DB paths/hashes")
@@ -246,7 +247,7 @@ def _build_and_freeze(target: Path, vault: Path, output_manifest: Path, checkpoi
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys=ON")
             for attempt in range(retries + 1):
-                before = inventory(vault)
+                before, rules_before = vault_state(vault)
                 stats = ingest_vault(conn, vault)
                 if stats.errors:
                     raise ValueError(f"vault ingest errors: {stats.errors}")
@@ -255,8 +256,8 @@ def _build_and_freeze(target: Path, vault: Path, output_manifest: Path, checkpoi
                 if embedder.spec.name != "bge-m3" or embedder.spec.dim != 1024:
                     raise ValueError("requires bge-m3 embedder")
                 embed_stats = embed_chunks(conn, embedder, batch_size=batch_size)
-                after = inventory(vault)
-                if before == after and db_inventory(conn) == after:
+                after, rules_after = vault_state(vault)
+                if before == after and rules_before == rules_after and db_inventory(conn) == after:
                     pruned = prune_retired_vectors(conn)
                     counts = validate(conn, after)
                     # Close and reopen below before hashing: no live WAL pages in frozen payload.
@@ -269,10 +270,12 @@ def _build_and_freeze(target: Path, vault: Path, output_manifest: Path, checkpoi
         with closing(connect_read_only(target)) as frozen:
             if frozen.execute("PRAGMA query_only").fetchone()[0] != 1:
                 raise ValueError("read-only evidence connection unavailable")
-            if inventory(vault) != db_inventory(frozen):
+            if vault_state(vault) != (db_inventory(frozen), rules_after):
                 raise ValueError("vault drift after checkpoint; resume checkpoint")
             validate(frozen, db_inventory(frozen))
         payload = {"status": "frozen_current_vault_candidate", "db": str(target),
+                   "built_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                   "ignore_rules_sha256": rules_after,
                    "db_bytes": target.stat().st_size, "db_sha256": sha(target),
                    "source_db_sha256": source_hash, "source_manifest_sha256": source_manifest_sha256,
                    "source_inventory_sha256": hashlib.sha256(json.dumps(after, sort_keys=True,
@@ -296,28 +299,45 @@ def _build_and_freeze(target: Path, vault: Path, output_manifest: Path, checkpoi
         raise
 
 
-def snapshot(target: Path, vault: Path, *, retries: int = 2, threads: int = 4, batch_size: int = 32,
-             embedder=None) -> dict:
+def snapshot(target: Path, vault: Path, *, resume: bool = False, retries: int = 2,
+             threads: int = 4, batch_size: int = 32, embedder=None) -> dict:
     """Build a first frozen snapshot of ``vault`` from scratch at ``target``.
 
     The result has the same manifest contract as a refresh output, so it can be served,
-    checked with ``quoth freshness`` and used as the source of later refreshes.
+    checked with ``quoth freshness`` and used as the source of later refreshes. With
+    ``resume``, an interrupted build continues from the checkpoint beside ``target``
+    (it must name this target and vault and match the current code and model digests):
+    committed chunks and vectors are kept, and only what is missing is embedded.
     """
     target, vault = target.absolute(), vault.resolve()
     if retries < 0 or batch_size < 1 or threads < 1:
         raise ValueError("invalid retry or embedding settings")
     output_manifest = target.with_suffix(".manifest.json")
     checkpoint = target.with_suffix(".checkpoint.json")
-    if (target.exists() or target.is_symlink() or output_manifest.exists()
-            or checkpoint.exists() or target.with_name(target.name + ".copying").exists()):
-        raise ValueError("output target collision")
     digests = code_digests()
     model_digest = _model_digest() if embedder is None else sha(eval_path("models-manifest.json"))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    _json_write(checkpoint, {"source_sha256": None, "target": str(target), "code_digests": digests,
-                             "index_code_digests": index_code_digests(),
-                             "model_manifest_sha256": model_digest})
-    open_db(target).close()  # creates the file and applies every migration
+    expected = {"source_sha256": None, "target": str(target), "vault_root": str(vault),
+                "code_digests": digests, "index_code_digests": index_code_digests(),
+                "model_manifest_sha256": model_digest}
+    copying = target.with_name(target.name + ".copying")
+    if output_manifest.exists() or output_manifest.is_symlink() or target.is_symlink():
+        raise ValueError("output target collision")
+    if not resume:
+        if target.exists() or checkpoint.exists() or copying.exists():
+            raise ValueError("output target collision")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _json_write(checkpoint, expected)
+    else:
+        if checkpoint.is_symlink() or not checkpoint.is_file():
+            raise ValueError("no compatible resumable checkpoint")
+        try:
+            saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+        except ValueError:
+            raise ValueError("no compatible resumable checkpoint") from None
+        if saved != expected or (target.exists() and not target.is_file()):
+            raise ValueError("no compatible resumable checkpoint")
+    # Creates the file and applies every migration; a no-op on a resumed target.
+    open_db(target).close()
     return _build_and_freeze(target, vault, output_manifest, checkpoint, retries=retries,
                              threads=threads, batch_size=batch_size, embedder=embedder,
                              digests=digests, model_digest=model_digest, source_hash=None,

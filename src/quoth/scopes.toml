@@ -11,13 +11,34 @@ default = "general"
 # Informational only; retrieval never filters on scope.
 default_recall = ["general", "work"]
 
+# Declared scopes. `recall` is the scope's recall tier (default "auto"):
+#   "auto"      its notes may appear in automatic recall (the sidecar's prefetch);
+#   "explicit"  its notes never appear in automatic recall; an explicit evidence call
+#               returns them only when the caller asks for them (`include_explicit`).
+# Either way the notes are indexed. To keep a note out of the index altogether, use
+# `.quothignore` at the vault root or `quoth: exclude` in its frontmatter.
+[scope.general]
+recall = "auto"
+
+[scope.work]
+recall = "auto"
+
+[scope.private]
+recall = "explicit"
+
 [[rule]]
 scope = "work"
 patterns = ["WORK/"]
 
+# Example: keep a folder out of automatic recall.
+# [[rule]]
+# scope = "private"
+# patterns = ["Health/"]
+
 [ingest]
-# Directory names skipped anywhere in the tree, besides every hidden directory (a name
-# starting with "."): .obsidian, .git, .trash, sync-tool version folders and agent
+# Built-in exclusions, the defaults that a vault's `.quothignore` adds to (and cannot
+# re-include): folder names skipped anywhere in the tree, besides every hidden name (a
+# leading "."): .obsidian, .git, .trash, sync-tool version folders and agent
 # folders such as .claude are never read. Listed here: attachment folders, and
 # ASSISTANT/, a folder of assistant-written notes, excluded so the assistant's own
 # output never becomes evidence.
