@@ -175,7 +175,10 @@ def retrieve(st, model: str, qvec: np.ndarray, query: str, k: int, *, mode: str 
         where, params = filt.sql()
         ranked.update(lexical_lists(st.conn, query, D.HYBRID_DEPTH, where=where, params=params))
         named_ids = [cid for p in named for cid in catalog.by_path.get(p, ()) if filt.allows(p, catalog.where(cid)[1])]
-        ranked["named"] = sorted(named_ids, key=lambda c: (-(_cosine(ids, sims, c) or -2.0), c))[:D.HYBRID_DEPTH]
+        def by_cosine(c: int):
+            cos = _cosine(ids, sims, c)
+            return (-(cos if cos is not None else -2.0), c)
+        ranked["named"] = sorted(named_ids, key=by_cosine)[:D.HYBRID_DEPTH]
         score: dict[int, float] = {}
         lists: dict[int, list[str]] = {}
         for name, chunk_ids in ranked.items():

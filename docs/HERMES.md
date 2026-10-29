@@ -230,7 +230,7 @@ query names. `--retrieval dense` ranks by cosine alone (the 0.16 behaviour), for
   6+ letters or with a digit ("Plan" or "Notes" alone never name a note). A named hit passes
   the cosine floor and gap (gate reason `name`); every other lexical-only hit must clear the
   floor and gap like a dense one. This is what lets an exact name or path reach the block
-  when its cosine is low, without letting a stray word match in.
+  when its cosine is low, without letting a stray word match in. Dense mode names nothing.
 - **Filters are pre-filters.** `path_prefix` and the recall tiers are applied in the vector
   matrix and the FTS queries, before ranking, so `k` hits come from inside the filter.
 - **Copies are dropped**: a hit whose normalized text (casefolded words) repeats an earlier
