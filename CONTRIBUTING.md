@@ -60,7 +60,7 @@ Examples: `feat(models): verify every download against its pinned sha256`,
 
 - **Index-contract files.** Editing a file listed in `CODE_FILES` in `src/quoth/refresh.py`
   (`chunker.py`, `db.py`, `dense.py`, `embed/backends.py`, `embed/store.py`, `entities.py`,
-  `ingest.py`, `scopes.py`, `scopes.toml`, `search.py`), `refresh.py` or `freshness.py`, or
+  `ingest.py`, `links.py`, `scopes.py`, `scopes.toml`, `search.py`, `vault.py`), `refresh.py` or `freshness.py`, or
   any evidence-DB migration, changes the code digests, and every existing snapshot becomes
   incompatible until it is rebuilt (`search.py` alone is serving-only and exempt). Put
   serving-speed changes in the serving modules instead, and call out any index-contract

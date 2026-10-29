@@ -3,6 +3,47 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
+## Unreleased
+
+### Index format change: rebuild every snapshot
+
+**The evidence schema and the index-contract files changed. Existing snapshots are
+incompatible and cannot be refreshed: build a fresh one with `quoth snapshot`** and switch
+the serving pointer to it ([FRESHNESS.md](docs/FRESHNESS.md#rebuilding-across-an-index-change)).
+`0001_evidence.sql` was edited in place, so a fresh snapshot has one clean schema.
+
+### Index
+
+- **Exclusion, one path.** `.quothignore` at the vault root (gitignore syntax: comments,
+  `!` negation, folder-only `/`, `*`, `?`, `[...]`, `**`, root anchoring) and frontmatter
+  `quoth: exclude` keep notes out of the index; `exclude_dirs` in `scopes.toml` and hidden
+  names are the built-in defaults that `.quothignore` adds to and cannot override. Excluded
+  notes are never read into the index (`vault.py`; ingest and the freshness inventory share
+  it).
+- **Excluded means purged.** A note that becomes excluded loses every row in the next
+  snapshot, current and historical: source, versions, chunks, vectors, entities, lexical and
+  link rows (`ingest.purged`). This includes rows earlier releases kept as retired history
+  under `ASSISTANT/`. A snapshot holding any row under a built-in exclusion is `invalid`.
+- **Rollback re-exposes excluded material.** Older snapshots still hold notes you have since
+  excluded; pointing serving back at one serves them again. Delete such snapshots (and
+  bundles made from them) once the rebuilt one is accepted.
+- **Rules count as vault content.** The manifest records `ignore_rules_sha256`; changing,
+  adding or removing `.quothignore` makes a snapshot `stale` (`ignore_rules_changed`).
+- **Links table.** Wikilinks, aliases, heading links, embeds and relative Markdown links are
+  stored per current chunk (`links`: `target`, `heading`, `line`, `kind`, `status`,
+  `target_path`), resolved Obsidian-style on every build: `resolved`, `missing`,
+  `ambiguous`, or `excluded` (the excluded note's path is never stored).
+- **File facts for staleness.** `source_versions` gains `mtime_ns` and `size_bytes` beside
+  `content_hash`, so serving can tell that a note changed since indexing.
+- **Recall tiers.** Scopes are declared in `scopes.toml` with `recall = "auto" | "explicit"`
+  (`quoth.scopes.recall_tier`, `quoth.scopes.explicit_scopes`); a new `private` scope is
+  `explicit`.
+- **Manifest `built_at`.** Every snapshot manifest records when it was built (UTC ISO-8601).
+- **`quoth snapshot --resume`** continues a killed first build from its checkpoint (same
+  target and vault, same code and model digests) instead of failing on the leftover target.
+- Bundles carry the `links` table; in a scoped bundle, links to notes outside the scope
+  become `excluded`.
+
 ## 0.16.0 — one recall path, snapshot admission off the request path
 
 ### Recall

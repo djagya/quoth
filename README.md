@@ -105,7 +105,24 @@ uv run quoth refresh --source /abs/accepted.db --target /abs/staging/unique-name
 uv run quoth freshness --source /abs/staging/unique-name.db --vault /abs/vault
 ```
 
-Every refresh target must be unique; `--resume` only continues the same unfinished target.
+Every refresh target must be unique; `--resume` only continues the same unfinished target
+(for `quoth snapshot` too).
+
+### What gets indexed
+
+Every Markdown note in the vault is indexed, except:
+
+- hidden folders and notes (a leading `.`) and the folders in `exclude_dirs` in
+  `src/quoth/scopes.toml` (`ASSISTANT/`, attachment folders);
+- whatever a `.quothignore` file at the vault root ignores (gitignore syntax, `!` to
+  re-include, `/` to anchor at the root), for example `Health/` or `/Journal/*`;
+- any note whose frontmatter says `quoth: exclude`.
+
+Excluded notes are never read into the index, and a note that becomes excluded is purged,
+history included, from the next snapshot. Older snapshots still hold it: delete them if you
+must not roll back to them. Scopes in `scopes.toml` carry a recall tier (`auto` or
+`explicit`): `explicit` notes are indexed but kept out of automatic recall. Links between
+notes are stored and resolved per snapshot. Details: [`docs/FRESHNESS.md`](docs/FRESHNESS.md#what-a-snapshot-holds).
 `quoth refresh-nightly` automates build, gate and switch behind a serving pointer (a
 symlink that `quoth mcp` and the sidecar follow). See [`docs/FRESHNESS.md`](docs/FRESHNESS.md).
 

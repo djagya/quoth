@@ -6,7 +6,7 @@ from quoth.db import connect, list_migrations, migrate
 
 TABLES = {
     "sources", "source_versions", "chunks", "chunks_fts", "chunks_fts_trigram",
-    "embeddings", "entities", "schema_migrations",
+    "embeddings", "entities", "links", "purge_sources", "schema_migrations",
 }
 
 
@@ -35,8 +35,12 @@ def test_schema_tables_and_columns(conn):
              if not r[0].endswith(shadow)}
     assert names == TABLES
     assert _cols(conn, "sources") == ["id", "path", "scope"]
-    assert _cols(conn, "source_versions") == ["id", "source_id", "content_hash", "ingested_at",
-                                              "is_current", "metadata"]
+    assert _cols(conn, "source_versions") == ["id", "source_id", "content_hash", "mtime_ns",
+                                              "size_bytes", "ingested_at", "is_current",
+                                              "metadata"]
+    assert _cols(conn, "links") == ["chunk_id", "target", "target_path", "heading", "line",
+                                    "kind", "status"]
+    assert _cols(conn, "purge_sources") == ["source_id"]
     assert _cols(conn, "chunks") == ["id", "source_version_id", "heading_path", "line_start",
                                      "line_end", "text"]
     assert _cols(conn, "embeddings") == ["chunk_id", "model", "dim", "vector"]
@@ -52,10 +56,12 @@ def test_constraints_and_append_only(conn):
     sid = conn.execute("INSERT INTO sources(path, scope) VALUES ('x.md', 'general')").lastrowid
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO sources(path, scope) VALUES ('x.md', 'work')")
-    vid = conn.execute("INSERT INTO source_versions(source_id, content_hash) VALUES (?, 'h')",
+    vid = conn.execute("INSERT INTO source_versions(source_id, content_hash, mtime_ns, size_bytes)"
+                       " VALUES (?, 'h', 1, 1)",
                        (sid,)).lastrowid
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("INSERT INTO source_versions(source_id, content_hash) VALUES (?, 'h2')", (sid,))
+        conn.execute("INSERT INTO source_versions(source_id, content_hash, mtime_ns, size_bytes)"
+                     " VALUES (?, 'h2', 1, 1)", (sid,))
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO chunks(source_version_id, line_start, line_end, text)"
                      " VALUES (?, 3, 2, 't')", (vid,))

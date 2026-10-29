@@ -41,7 +41,7 @@ CREATE INDEX chunks_version ON chunks(source_version_id);
 -- Notes being purged because they became excluded (`.quothignore`, `quoth: exclude`,
 -- built-in rules). Ingest fills it, deletes every row of those notes, then empties it.
 CREATE TABLE purge_sources (
-    source_id  INTEGER PRIMARY KEY REFERENCES sources(id)
+    source_id  INTEGER PRIMARY KEY
 );
 
 -- History is append-only: notes, versions and chunks are never deleted, except the
