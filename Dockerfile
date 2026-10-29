@@ -21,7 +21,15 @@ COPY eval eval
 COPY hermes_plugin hermes_plugin
 COPY web web
 COPY tests tests
+COPY scripts scripts
+COPY .github .github
+COPY deploy deploy
 RUN uv sync --locked --extra dense
+# Older Docker Desktop VM kernels lack SME support, and the OpenSSL bundled in recent
+# cryptography wheels probes for it on Apple M4 hosts (SIGILL). Disable the probe in every
+# Python process, including subprocesses started with a cleaned environment (MCP stdio).
+RUN printf 'import os\nos.environ.setdefault("OPENSSL_armcap", "0")\n' \
+    > /opt/venv/lib/python3.13/site-packages/sitecustomize.py
 
 VOLUME ["/data", "/models"]
 ENTRYPOINT ["quoth"]

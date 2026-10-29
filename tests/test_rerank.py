@@ -45,7 +45,7 @@ def test_passages_are_folded_and_bounded():
 def test_missing_model_files_are_unavailable_not_downloaded(tmp_path):
     pytest.importorskip("onnxruntime")
     pytest.importorskip("tokenizers")
-    with pytest.raises(rerank.RerankerUnavailable, match="--download"):
+    with pytest.raises(rerank.RerankerUnavailable, match="quoth models fetch"):
         rerank.get_reranker(rerank.DEFAULT_MODEL, cache_dir=str(tmp_path))
     assert not any(tmp_path.iterdir())
     with pytest.raises(ValueError, match="unknown reranker"):
