@@ -209,7 +209,10 @@ against it.
 4. **Time budget.** Vault evidence and meaning-matched claims count only if ready within
    `--evidence-budget` (1.5 s). Otherwise the turn gets word-matched claims only
    (`evidence_status: slow`) while the search finishes in the background and warms the
-   caches; later turns skip evidence (`busy`) instead of queueing behind it.
+   caches; later turns skip evidence (`busy`) instead of queueing behind it. With
+   `--prefetch-log`, a late search's result is recorded (when it finished, against the
+   turn's deadline, and what the gate would have injected), never served: see
+   [measuring the late tail](#measuring-the-late-tail).
 5. **Lanes.** Up to 2 excerpts (240 characters) per enabled lane at or above its cosine
    floor (0.62), from what is left of the evidence budget, excluding the current session.
    The owner lane is on by default, the assistant lane off.
@@ -299,6 +302,27 @@ rounded to 4 decimals, and floors compare that rounded value:
 `pool` (the turn judged it for injection), `passed` and `gate` (the gate's decision and
 reason) and `injected` (it reached the block).
 
+### Measuring the late tail
+
+The prefetch log records what a `slow` turn missed without changing anything for it: no late
+result is served, no extra search or rerank runs, and the answer, gate and budget are the
+same with the log on or off (tests check this, and a bounded overhead). Each authored turn
+gets a request id before its search is submitted; the turn's events (`start`, `submitted` or
+`busy`, `wait`, `prefetch`) and its job's single `done` line (`normal`, `exception` type, or
+`censored` when the sidecar closes first) are joined by id. A `done` line names the snapshot
+the job searched and what the turn's own gate would have injected, or `unknown` when the
+turn's decision needs rerank scores. `counters` lines (every 300 s and at close) report
+dropped and failed lines and jobs in flight, so lost lines cannot flatter the result.
+
+Read a bounded window with `quoth eval online --log DIR --since T [--until T] [--max-turns N]`:
+its `late_tail` section gives strata by version, code, config and snapshot; slow and busy
+apart; completions against the effective deadline; for 1.5, 2.0, 2.5 and 2.8 s budgets how
+many slow turns would have injected something (admissible nonempty) or stayed empty or
+`unknown`; request and job durations and headroom inside the plugin's 3 s timeout; and a
+descriptive overlap with the next explicit search, which is not answer quality. A larger
+budget is a separate, explicit decision: the report never changes `--evidence-budget`.
+Fields: [EVAL.md](EVAL.md#online-measurement-the-prefetch-log).
+
 ## Sidecar flags
 
 Paths default under `$QUOTH_HOME`; the Hermes `state.db` under `$HERMES_HOME`.
@@ -327,7 +351,7 @@ Paths default under `$QUOTH_HOME`; the Hermes `state.db` under `$HERMES_HOME`.
 | `--owner-min-score X` | 0.62 | cosine floor for owner-lane excerpts |
 | `--episodes-interval S` | 300 | seconds between background lane ticks |
 | `--episodes-tick-seconds S` | 60 | CPU budget of one lane tick |
-| `--prefetch-log DIR` | off | record-only JSON line per turn and per search tool call: hashes, ids, locators, scores and timings, never the query or excerpt text ([EVAL.md](EVAL.md#online-measurement-the-prefetch-log)); on in the [s6 template](../deploy/s6/quoth-sidecar/run) under `$QUOTH_HOME/prefetch-log` |
+| `--prefetch-log DIR` | off | record-only JSON lines per turn, per evidence job (start, submitted or busy, wait, return, done) and per search tool call: hashes, ids, locators, scores, config and timings, never the query or excerpt text ([EVAL.md](EVAL.md#online-measurement-the-prefetch-log)); on in the [s6 template](../deploy/s6/quoth-sidecar/run) under `$QUOTH_HOME/prefetch-log` |
 | `--prefetch-log-days N` | 30 | prune log files older than N days |
 | `--vault-min-cosine X\|off` | 0.53 | relevance gate: vault cosine floor |
 | `--vault-max-gap X\|off` | 0.15 | relevance gate: most a vault hit may sit below the turn's top hit |

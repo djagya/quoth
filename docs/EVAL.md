@@ -11,7 +11,7 @@ CLI:
 | `quoth eval run SET …` | score a set against the real prefetch path and write a receipt |
 | `quoth eval compare A B [--tolerances FILE]` | gate-style diff of two receipts |
 | `quoth eval sweep RECEIPT [--max-loss 0.01]` | replay relevance-gate thresholds on a receipt's candidates |
-| `quoth eval online --log DIR [--days N]` | aggregate readout of the sidecar's prefetch log |
+| `quoth eval online --log DIR [--days N] [--since T] [--until T] [--max-turns N]` | aggregate readout of the sidecar's prefetch log, with the late-tail window report |
 
 ```python
 from quoth.evals import load_set, validate, run_set, Receipt, InProcessTarget, compare
@@ -410,9 +410,9 @@ the fixture in `tests/test_evals.py` and against the installed wheel in `scripts
 
 ## Online measurement: the prefetch log
 
-`quoth sidecar … --prefetch-log DIR [--prefetch-log-days 30]` (off when omitted) appends one
-JSON line per real (non-dry-run) prefetch to `DIR/prefetch-YYYY-MM-DD.jsonl` (UTC, mode 0600,
-directory 0700):
+`quoth sidecar … --prefetch-log DIR [--prefetch-log-days 30]` (off when omitted) appends JSON
+lines to `DIR/prefetch-YYYY-MM-DD.jsonl` (UTC, mode 0600, directory 0700). Each real
+(non-dry-run) prefetch writes one turn record when it returns:
 
 ```json
 {"type": "prefetch", "ts": "…", "v": "0.17.0", "session": "<sha256(session_id)[:16]>",
@@ -433,31 +433,84 @@ directory 0700):
 served with, so it can be replayed. `live` is the freshness check of the injected hits (with
 `--vault`).
 
-**Late records.** When a turn's vault search is `slow`, the search keeps running in the
-background; when it finishes, one follow-up line records what the turn missed, record-only
-(nothing is injected later):
+**Late-tail events (record-only).** Every authored live turn gets a request id (`req`) before
+anything is submitted, and its vault job a job id (`job`). The turn and its job write separate
+lines, joined by id, never by their position in the file (a job can finish before its turn
+returns, or long after). Nothing is ever injected late, no extra search or rerank runs for the
+log, and the gate, budget and answer are the same with the log on or off. Every line carries
+`inst` (the process instance) and `ts` (UTC, to join across files); the `*_ms` fields of one
+request are monotonic milliseconds from its start, in one process.
 
 ```json
-{"type": "late", "ts": "…", "v": "0.17.0", "session": "…", "query_sha256": "…",
- "snapshot_id": "<sha256>", "retrieval": "hybrid", "completed_ms": 2143.0, "budget_ms": 1500.0,
- "would_inject": ["PROJECTS/x.md:3-9"], "pool": ["PROJECTS/x.md:3-9", "…"]}
+{"type": "instance", "ts": "…", "v": "0.17.0", "code_sha256": "98dfd4056b7f7e91", "pid": 4242,
+ "python": "3.13.16", "schema": "quoth-prefetch-log/2", "inst": "f5034bcb77314230"}
+{"type": "start", "ts": "…", "req": "79ff4391b8b04d16", "v": "0.17.0", "code_sha256": "98dfd4056b7f7e91",
+ "session": "…", "query_sha256": "…", "query_len": 17,
+ "config": {"gate": {"vault_min_cosine": 0.53, "vault_max_gap": 0.15, "…": null}, "retrieval": "hybrid",
+            "model": "bge-m3", "k_evidence": 3, "k_claims": 6, "vault_pool": 10, "claim_pool": 12,
+            "evidence_budget_ms": 1500.0, "per_note": 1, "rerank": null, "lanes": {"owner": true}},
+ "config_sha256": "d9c594986bd135c5", "inst": "…"}
+{"type": "submitted", "ts": "…", "req": "79ff…", "job": "975ae8ebbe614af4", "submitted_ms": 0.51, "inst": "…"}
+{"type": "wait", "ts": "…", "req": "79ff…", "job": "975a…", "wait_ms": 0.61, "budget_ms": 1500.0,
+ "deadline_ms": 1500.61, "deadline_ts": "…", "inst": "…"}
+{"type": "prefetch", "…": "the turn record above", "req": "79ff…", "job": "975a…", "returned_ms": 1503.6,
+ "wait_end_ms": 1503.5, "config_sha256": "d9c5…", "inst": "…"}
+{"type": "busy", "ts": "…", "req": "0277267f943c4e13", "job": null, "busy_job": "975a…", "inst": "…"}
+{"type": "done", "ts": "…", "req": "79ff…", "job": "975a…", "outcome": "normal", "completed_ms": 2108.7,
+ "snapshot_id": "<sha256>", "raw_n": 3, "candidates": ["A.md:1-4", "B.md:1-4", "C.md:1-4"],
+ "claims_dense_n": 0, "decision": "computed", "would_inject": ["A.md:1-4", "B.md:1-4"],
+ "would_inject_n": 2, "passed_n": 2, "inst": "…"}
+{"type": "counters", "ts": "…", "reason": "close", "dropped": 0, "errors": 0, "written": 9, "queued": 0,
+ "jobs_started": 1, "jobs_completed": 1, "jobs_censored": 0, "in_flight": 0,
+ "unjoined_completions": 0, "completed_before_return": 0, "untracked": 0, "inst": "…"}
 ```
 
-`completed_ms` counts from the start of the turn; `would_inject` is what the gate would have
-injected (locators only, no text).
+| Line | When | Key fields |
+|---|---|---|
+| `instance` | once per sidecar process | `code_sha256` (the loaded package's sources, apart from the version label), `pid`, `python` |
+| `start` | the turn began, before any submission | `config` (gate, retrieval, k, pools, budgets, reranker, lanes) and its `config_sha256`, `code_sha256`, `v` |
+| `submitted` | its vault job was started | `job`, `submitted_ms` |
+| `busy` | instead of `submitted`: the previous job still runs, **no job is started** | `busy_job` (the running job) |
+| `wait` | the turn began waiting for the job | `wait_ms`, `budget_ms`, `deadline_ms` (the effective deadline), `deadline_ts` |
+| `prefetch` | the turn returned (main return) | the turn record, plus `req`, `job`, `returned_ms`, `wait_end_ms`, `busy_job` |
+| `done` | the job finished, exactly once per job | `outcome` and the fields below |
+| `counters` | every 300 s and at close | the logger's own losses and the job tracking |
+
+`done.outcome` is `normal`, `exception` (with `exc_type`, the type name only, never the
+message) or `censored` (`censored_reason: shutdown`, `running_ms`: still running when the
+sidecar closed; a job that finishes after that writes nothing more). A normal `done` holds
+`snapshot_id`, the snapshot **the job's lease searched** (not the pointer when it finished),
+`raw_n` (hits returned), `candidates` (the pool's locators) and the counterfactual
+post-gate decision, made with the turn's own gate, k and pool by the same `judge_vault` and
+`vault_pick` the turn uses: `would_inject` (locators) and `would_inject_n`. When the turn's
+full decision would rerank its vault hits (a reranker with vault rerank rules), a job never
+has those scores: `decision` is then `unknown` (`unknown_reason: rerank_not_computed`,
+`would_inject: null`), and no cosine-only pick is offered in its place. Dense claims are
+counted (`claims_dense_n`), not judged. On time, `would_inject` equals what the turn injected.
+
+`counters`: `dropped` (lines lost to a full queue), `errors` (lines that failed to encode or
+write), `in_flight` (jobs not yet done), `unjoined_completions` (done, but their turn never
+logged a return), `completed_before_return`, `jobs_started|completed|censored`. They are
+written by the writer thread itself, so a full queue cannot drop them; an instance with no
+`close` line ended without a clean shutdown.
 
 It also writes one line per `evidence_bundle` and `episode_search` tool call (`{"type": "tool",
 "tool", "session", "k", "who", "results": [locators]}`) and one per skipped injected turn
-(`{"type": "skip", "reason": "not_authored"}`). No query or excerpt text is logged; the query
-hash is unsalted and locators carry note paths, so treat the log as private. Writes go through
-a bounded queue to one thread and are never fsynced; a full queue or an I/O error drops the
-record (warned once), so a turn is never slowed. Files older than `--prefetch-log-days` are
-pruned when a new day's file opens.
+(`{"type": "skip", "reason": "not_authored"}`). No query, excerpt or claim text is logged
+(tests check the encoded bytes); the query hash is unsalted and locators carry note paths, so
+treat the log as private. Writes go through a bounded queue to one thread and are never
+fsynced; a full queue or an I/O error drops the record (counted, warned once), so a turn is
+never slowed. The counterfactual decision is built on the writer thread, not on the request
+or the evidence worker. Files older than `--prefetch-log-days` are pruned when a new day's
+file opens.
 
-`quoth eval online --log DIR [--days N]` reads it: turns, sessions, injected rate per store,
-empty-recall rate, probable-miss rate (a search tool call in the same session after a turn and
-before the next one), score distributions, statuses, query length and latency p50/p95 per
-stage. Aggregates only. Two joins answer the host questions:
+`quoth eval online --log DIR [--days N] [--since T] [--until T] [--max-turns N]` reads it:
+turns, sessions, injected rate per store, empty-recall rate, probable-miss rate (a search tool
+call in the same session after a turn and before the next one), score distributions,
+statuses, query length and latency p50/p95 per stage. Aggregates only. `--since` and
+`--until` (ISO-8601, UTC when no zone; `--until` exclusive) and `--max-turns` (the first N
+authored turns from `--since`) bound the window; the aggregate then covers the window's turns.
+Two joins answer the host questions:
 
 - **`explicit_join`**: each `evidence_bundle` call is joined to the last prefetch of its
   session, note by note (a locator's path). `rate.injected` / `passed_not_injected` /
@@ -465,10 +518,29 @@ stage. Aggregates only. Two joins answer the host questions:
   returned at least one such note; `rate.pooled_not_injected` (the turn had judged the note but
   did not inject it) and `rate.never_pooled` (the turn's pool never had it) separate a ranking
   or gate miss from a retrieval miss. `notes` counts the result notes per class.
-- **`late`**: the late records: `completed_ms` p10/p50/p90, `within` (share of late turns that
-  would have finished within a 2.0, 2.5 or 2.8 s budget; the plugin waits 3.0 s), and
-  `search_returned_late_note_rate` (when the session's next explicit search returned a note
-  the late search would have injected).
+- **`late_tail`**: the window report. Each turn of the window (a `start` line) is joined by id
+  to its events wherever they are in the files read, so a job started in the window and
+  finished after it is reconciled (`jobs.completed_after_window`), and a missing line is
+  counted, never dropped from a denominator:
+
+| Field | Meaning |
+|---|---|
+| `source`, `window` | the files and record counts read; the bounds asked for, the first and last turn, whether `--max-turns` cut it |
+| `turns`, `status` | authored turns and their vault status (`ok`, `slow`, `busy`, `unavailable`, `missing_return`) |
+| `strata` | turns per `v` × `code_sha256` × `config_sha256` × searched `snapshot_id` |
+| `jobs` | jobs started, `outcomes`, `exception_types`, `completed_after_window` |
+| `missing`, `duplicates`, `logger` | turns without a `prefetch`, `wait` or `done` line; repeated lines; the summed last `counters` per instance (`dropped`, `errors`, `in_flight`, `unjoined_completions`, `instances_closed`) |
+| `slow` | slow turns: `completion_minus_deadline_ms` (p50/p90/max) and `bins_ms` (0–500, 500–1000, 1000–1300, 1300–1500, over 1500 ms after the effective deadline) |
+| `busy` | busy turns, how many name the running job, and how many of those jobs are in the window |
+| `budgets` | per budget 1.5, 2.0, 2.5 and 2.8 s over the slow turns (`denominator_slow_turns`): `fit` (done within the budget of the wait start), split into `admissible_nonempty` (the gate would have injected something; `…_within_client_deadline`: and the turn would still have returned inside 3 s), `empty_raw`, `empty_post_gate`, `unknown`; and `not_fit`, `exception`, `censored`, `missing` |
+| `durations_ms` | request (`returned_ms`) and job (done − submitted) p50/p90/max; `headroom_to_client_deadline` (3000 − request ms: p50, p10, min) and `over_client_deadline` |
+| `explicit_overlap` | for ok turns (injected notes) and slow turns (would-inject notes): how many were followed by an `evidence_bundle` call in the same session before its next turn, and how many of those returned one of the notes |
+
+The overlap is a descriptive join, captioned as such in the report: the next explicit search
+may look for something else than the turn did, so it is not answer quality nor the usefulness
+of an answer. Zero `admissible_nonempty` cases mean too little data, not that there is no
+problem, and no budget is safe because this report shows it fits: the measurement never
+changes the production budget.
 
 ## The nightly gate and daily quality
 

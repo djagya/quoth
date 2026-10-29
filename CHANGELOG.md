@@ -70,11 +70,26 @@ the serving pointer to it ([FRESHNESS.md](docs/FRESHNESS.md#rebuilding-across-an
 
 ### Measurement
 
-- Prefetch-log records carry `snapshot_id`, `retrieval` and the gate settings; a `slow`
-  turn's search, once finished, logs a `late` record with its completion time and the
-  locators it would have injected.
+- Prefetch-log records carry `snapshot_id`, `retrieval` and the gate settings.
+- **Record-only late-tail measurement** (prefetch log schema 2). Each authored turn gets a
+  request id before its search is submitted and writes `start` (code digest, config and its
+  digest, budgets, gate, k), `submitted` or `busy` (a busy turn starts no job and names the
+  running one), `wait` (the effective deadline) and its `prefetch` return line; its evidence
+  job writes exactly one `done` line, joined by id in any order: `normal` (the snapshot the
+  job searched, raw count, candidate locators and the post-gate would-inject locators with
+  the turn's own gate, or `unknown` when the decision needs a rerank that was not computed),
+  `exception` (type name only) or `censored` at shutdown. Every line carries the process
+  instance; `instance` and `counters` lines (every 300 s and at close: dropped and failed
+  lines, jobs in flight, unjoined completions) keep lost lines visible. No query, excerpt
+  or claim text, no extra search or rerank, and no change to answers, gates or budgets. The
+  0.17 development `late` record is replaced by `done`.
 - `eval online` joins each explicit search to its session's last prefetch (`explicit_join`:
-  injected, pooled but not injected, never pooled) and reads the late tail (`late`).
+  injected, pooled but not injected, never pooled) and reports the late tail of a bounded
+  window (`late_tail`; `--since`, `--until`, `--max-turns`): strata by version, code, config
+  and snapshot, slow and busy apart, completion against the effective deadline, what 1.5,
+  2.0, 2.5 and 2.8 s budgets would add (admissible nonempty vs empty or unknown), request and
+  job durations with headroom inside the 3 s client deadline, exact denominators with missing,
+  dropped and unjoined lines, and a descriptive note overlap with the next explicit search.
 - `eval run` scores the explicit bundle beside the prefetch (`explicit` in the receipt),
   records `config.retrieval`, takes `--retrieval` and `--vault`, and `--trace-out FILE` writes
   a private per-row trace (query, exact recall block, explicit hits) for caller tests.

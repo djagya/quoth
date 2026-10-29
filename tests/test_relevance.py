@@ -256,7 +256,7 @@ def test_prefetch_log_carries_gate_fields_without_text(tmp_path, state_db):
         app.prefetch({"query": "how do I feed the sourdough starter", "session_id": "s1"})
         app.prefetch_log.flush()
         raw = "".join(p.read_text() for p in (tmp_path / "log").glob("*.jsonl"))
-        turn = json.loads(raw.splitlines()[0])
+        turn = next(r for r in map(json.loads, raw.splitlines()) if r["type"] == "prefetch")
         assert [(v["pool"], v["passed"], v["gate"], v["injected"]) for v in turn["stores"]["vault"]] == [
             (True, True, "cosine", True), (True, True, "cosine", True), (True, False, "below_floor", False),
             (True, False, "below_floor", False)]
