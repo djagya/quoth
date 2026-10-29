@@ -167,7 +167,9 @@ def built(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def run(built):
-    target = InProcessTarget.build(**built["paths"], model=built["model"], episodes_prefetch=True)
+    # No gate (hash-ngram cosines sit under the bge-m3 serving floor): the sweep's baseline.
+    from quoth.relevance import Gate
+    target = InProcessTarget.build(**built["paths"], model=built["model"], episodes_prefetch=True, gate=Gate())
     try:
         receipt, detail = run_set(load_set(SET), target, gold_drift=True, detail=True)
     finally:
@@ -286,6 +288,18 @@ def test_receipt_records_candidate_signals_without_text(run):
     vault = [it for rec in cands["rows"].values() for it in rec["stores"]["vault"]["items"]]
     assert vault and all(isinstance(it["score"], float) and "lexical" in it for it in vault)
     assert receipt.data["config"]["gate"] == {k: None for k in GATE}
+
+
+def test_eval_run_gates_with_the_serving_defaults(built):
+    """Without gate flags `eval run` judges exactly as the sidecar serves (`recall_defaults.GATE`)."""
+    from quoth import recall_defaults
+    from quoth.relevance import Gate
+    target = InProcessTarget.build(**built["paths"], model=built["model"])
+    try:
+        assert target.config()["gate"] == Gate(**recall_defaults.GATE).to_dict()
+        assert target.config()["gate"]["vault_min_cosine"] == recall_defaults.GATE["vault_min_cosine"]
+    finally:
+        target.close()
 
 
 def test_sweep_baseline_reproduces_the_receipt(run):

@@ -387,8 +387,7 @@ RERANK_COLUMNS = (("rerank_p95_ms", "p95 ms"), ("rerank_in_time", "in time"))
 
 
 def _label(gate: dict) -> str:
-    flags = relevance.Gate.from_dict(gate).flags()
-    return " ".join(f"{flags[i][2:]}={flags[i + 1]}" for i in range(0, len(flags), 2)) or "no gate"
+    return relevance.Gate.from_dict(gate).label()
 
 
 def _fmt(value) -> str:

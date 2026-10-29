@@ -5,6 +5,7 @@ rerank replay (equal to an in-process run with the same flags)."""
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import threading
 import time
@@ -161,12 +162,14 @@ def test_partial_scores_keep_the_cosine_gate_and_a_widen_reorders():
     assert relevance.rerank_usable(gate, full, 4, 3)
     assert [r for _, r in relevance.decide_vault(gate, items, 3, full)] == [
         "rerank_floor", "rerank_floor", "rerank", "rerank"]
-    assert relevance.vault_order(gate, 4, 3, full) == [2, 3, 1]
+    passed = [ok for ok, _ in relevance.decide_vault(gate, items, 3, full)]
+    assert relevance.vault_pick(gate, passed, 10, 3, full) == [2, 3]  # by rerank score, then the gate
     partial = [0.1, 0.2, 0.9, None]  # the widen's 4th hit was not scored in time
     assert not relevance.rerank_usable(gate, partial, 4, 3)
     assert [r for _, r in relevance.decide_vault(gate, items, 3, partial)] == [
         "cosine", "cosine", "below_floor", "below_floor"]
-    assert relevance.vault_order(gate, 4, 3, partial) == [0, 1, 2]
+    passed = [ok for ok, _ in relevance.decide_vault(gate, items, 3, partial)]
+    assert relevance.vault_pick(gate, passed, 10, 3, partial) == [0, 1]  # cosine order, cosine gate
     # Only as many as there are: two hits, both scored, is a usable turn.
     assert relevance.rerank_usable(gate, [0.4, 0.5], 2, 3)
 
@@ -214,8 +217,8 @@ def test_widen_serves_the_best_by_rerank_among_the_top_n(tmp_path, state_db):
         out = app.prefetch({"query": QUERY, "dry_run": True, "k_candidates": 4})
         assert [e["locator"] for e in out["detail"]["evidence"]] == ["a.md:1-2", "d.md:1-2", "c.md:1-2"]
         vault = out["detail"]["candidates"]["vault"]
-        # `served` keeps its meaning (the cosine prefix); rank 4 is injected through the widen.
-        assert [c["served"] for c in vault] == [True, True, True, False]
+        # Every hit is in the pool; rank 4 is injected through the widen.
+        assert [c["pool"] for c in vault] == [True] * 4
         assert [c["injected"] for c in vault] == [True, False, True, True]
         assert out["text"].index("d.md:1-2") < out["text"].index("c.md:1-2")
     finally:
@@ -303,7 +306,7 @@ def test_prefetch_log_carries_rerank_scores_without_text(tmp_path, state_db):
         app.prefetch_log.flush()
         raw = "".join(p.read_text() for p in (tmp_path / "log").glob("*.jsonl"))
         turn = json.loads(raw.splitlines()[0])
-        assert [v["rerank"] for v in turn["stores"]["vault"]] == [0.93, 0.04, 0.61]
+        assert [v["rerank"] for v in turn["stores"]["vault"]] == [0.93, 0.04, 0.61, None]
         assert turn["status"]["rerank"] == "ok" and "sourdough" not in raw
     finally:
         app.close()
@@ -315,7 +318,7 @@ def test_sidecar_cli_accepts_rerank_flags(monkeypatch):
     with pytest.raises(SystemExit):
         sidecar.main(["--ledger", ":memory:", "--state-db", "", "--rerank-model", "hash-rerank",
                       "--vault-min-rerank", "0.3", "--vault-rerank-widen", "6"])
-    assert seen["gate"] == Gate(vault_min_rerank=0.3, vault_rerank_widen=6)
+    assert seen["gate"] == replace(relevance.default_gate(), vault_min_rerank=0.3, vault_rerank_widen=6)
     assert seen["reranker"].name == "hash-rerank" and not seen["reranker"].claims
     seen.clear()
     with pytest.raises(SystemExit):
@@ -328,8 +331,8 @@ def test_sidecar_cli_accepts_rerank_flags(monkeypatch):
 
 # ------------------------------------------------------------------ sweep
 
-def _item(score, rerank_score=None, served=True, match=()):
-    out = {"score": score, "served": served, "injected": served}
+def _item(score, rerank_score=None, injected=True, match=()):
+    out = {"score": score, "pool": True, "injected": injected}
     if rerank_score is not None:
         out["rerank"] = rerank_score
     if match:
@@ -345,9 +348,9 @@ def _rec(vault, expected=1, abstain=False):
 
 ROWS = {
     # Gold at rank 1; the cross-encoder sees the neighbours are noise.
-    "a": _rec([_item(0.80, 0.97, match=[0]), _item(0.62, 0.02), _item(0.58, 0.01), _item(0.50, 0.3, served=False)]),
+    "a": _rec([_item(0.80, 0.97, match=[0]), _item(0.62, 0.02), _item(0.58, 0.01), _item(0.50, 0.3, injected=False)]),
     # Gold at cosine rank 4, which only a widen can serve.
-    "b": _rec([_item(0.66, 0.05), _item(0.61, 0.03), _item(0.60, 0.02), _item(0.59, 0.91, served=False, match=[0])]),
+    "b": _rec([_item(0.66, 0.05), _item(0.61, 0.03), _item(0.60, 0.02), _item(0.59, 0.91, injected=False, match=[0])]),
     # Nothing relevant, high cosines anyway.
     "c": _rec([_item(0.70, 0.01), _item(0.68, 0.004), _item(0.65, 0.002)], expected=0, abstain=True),
 }
@@ -391,9 +394,9 @@ def test_sweep_recommends_a_rerank_config_and_names_the_fallback():
 def test_record_keeps_rerank_scores_and_no_text():
     row = {"id": "r", "question": QUERY,
            "expect": {"abstain": False, "sources": [{"store": "vault", "match": {"path": "a.md"}}]}}
-    cands = {"vault": [{"locator": "a.md:1-2", "path": "a.md", "score": 0.7, "served": True, "injected": True,
+    cands = {"vault": [{"locator": "a.md:1-2", "path": "a.md", "score": 0.7, "pool": True, "injected": True,
                         "lexical": 1.0, "matched": 3, "rerank": 0.97, "text": "Feed the sourdough starter."},
-                       {"locator": "b.md:1-2", "path": "b.md", "score": 0.5, "served": True, "injected": False,
+                       {"locator": "b.md:1-2", "path": "b.md", "score": 0.5, "pool": True, "injected": False,
                         "lexical": 0.0, "matched": 0, "rerank": None, "text": "Rent."}]}
     a, b = SW.record(row, cands, row["expect"]["sources"])["stores"]["vault"]["items"]
     assert a["rerank"] == 0.97 and "rerank" not in b and "Rent" not in json.dumps([a, b])
@@ -485,7 +488,8 @@ def test_late_claims_cost_only_the_claims_rerank(tmp_path, state_db):
         out = app.prefetch({"query": "how do I feed the sourdough starter with green tea", "dry_run": True})
         assert out["detail"]["status"]["rerank"] == "partial"
         vault = out["detail"]["candidates"]["vault"]
-        assert [c["gate"] for c in vault] == ["rerank", "rerank_floor", "rerank"]  # vault scores kept
+        assert [c["gate"] for c in vault] == ["rerank", "rerank_floor", "rerank", "off"]  # vault scores kept
+        assert [c["injected"] for c in vault] == [True, False, True, False]  # rank 4 was never reranked
         (claim,) = out["detail"]["candidates"]["claims"]
         assert claim["rerank"] is None and claim["gate"] == "off" and claim["injected"]  # claim rules
     finally:
@@ -630,7 +634,7 @@ def test_sweep_scoring_also_ends_at_the_evidence_deadline():
     assert SW.evaluate(rows, gate, budget_ms=800, evidence_ms=None)[0]["rerank_in_time"] == 1.0
     # eval run records the row's search time when it reranked.
     row = {"id": "r", "question": QUERY, "expect": {"abstain": False, "sources": []}}
-    cands = {"vault": [{"locator": "a.md:1-2", "score": 0.7, "served": True, "injected": True, "rerank": 0.9,
+    cands = {"vault": [{"locator": "a.md:1-2", "score": 0.7, "pool": True, "injected": True, "rerank": 0.9,
                         "rerank_ms": 40.0}]}
     assert SW.record(row, cands, [], timings={"vault": 120.0, "claims_dense": 5.5})["dense_ms"] == 125.5
     assert "dense_ms" not in SW.record(row, {"vault": [{"locator": "a", "score": 0.7}]}, [], timings={"vault": 1.0})

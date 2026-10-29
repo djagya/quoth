@@ -58,7 +58,7 @@ under above below between after before during while because until been being
 этого этому этим этой этом эту того тому тем том тех теми весь вся всего всей всем всех
 наш наша наше наши нашего нашей ваш ваша ваше ваши мной тобой ему ней нее неё них ним ними
 чего чему сейчас потом теперь тогда даже вот вообще ведь быть буду будешь будем будут
-нет либо куда откуда сам сама сами самый хочу хочет может могу
+такой такая такое такие такого таким нет либо куда откуда сам сама сами самый хочу хочет может могу
 que para com uma uns umas como onde quando qual quais por pelo pela pelos pelas sobre mas não
 isso isto este esta esse essa aquele aquela meu minha meus minhas você vocês ele ela eles elas
 foi ser são tem têm está estão seu sua seus suas dos das nos nas num numa
@@ -226,13 +226,20 @@ class Gate:
                       for f in fields(cls)})
 
     def flags(self) -> list[str]:
-        """The sidecar (and `eval run`) flags that set this gate."""
+        """The sidecar (and `eval run`) flags that set exactly this gate: every threshold
+        that differs from the serving default (`recall_defaults.GATE`), `off` for a default
+        check this gate leaves off."""
         out = []
         for f in fields(self):
             value = getattr(self, f.name)
-            if value is not None:
-                out += ["--" + f.name.replace("_", "-"), f"{value:g}"]
+            if value != D.GATE[f.name]:
+                out += ["--" + f.name.replace("_", "-"), "off" if value is None else f"{value:g}"]
         return out
+
+    def label(self) -> str:
+        """The thresholds this gate sets, `name=value` (eval tables); "no gate" when none."""
+        return " ".join(f"{f.name.replace('_', '-')}={getattr(self, f.name):g}" for f in fields(self)
+                        if getattr(self, f.name) is not None) or "no gate"
 
 
 RERANK_FIELDS = ("vault_min_rerank", "vault_max_rerank_gap", "vault_rerank_widen", "claims_min_rerank")
