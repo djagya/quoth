@@ -6,9 +6,14 @@ template is parameterized by the same few variables; set them once per host:
 | Variable | What | Example |
 |---|---|---|
 | `QUOTH_PREFIX` | install prefix: every `quoth-X.Y.Z/` venv and the `quoth-current` link | `/srv/quoth/venvs` |
-| `QUOTH_HOME` | quoth's state: `ledger.db`, `episodes.db`, `owner-episodes.db`, `core/`, `quoth.sock`, `staging/`, `refresh/` | `/srv/quoth/state` |
+| `QUOTH_HOME` | quoth's state: `ledger.db`, `episodes.db`, `owner-episodes.db`, `core/`, `quoth.sock`, `staging/`, `refresh/`, `prefetch-log/` | `/srv/quoth/state` |
 | `HERMES_HOME` | the Hermes home; quoth reads its `state.db` read-only and installs the plugin under `plugins/quoth/` | `/srv/hermes` |
 | `QUOTH_MODEL_CACHE` | local ONNX model files (default `$QUOTH_HOME/models`) | `/srv/quoth/state/models` |
+
+The sidecar template turns on the prefetch log (`--prefetch-log "$QUOTH_HOME/prefetch-log"`,
+pruned after 30 days, directory 0700). It is record-only: one JSON line per turn and per
+search tool call with hashes, ids, locators, scores and timings, never the query or excerpt
+text. It never changes what a turn injects; `quoth eval online --log DIR` reads it.
 
 Nothing in quoth listens on the network. The sidecar's Unix socket
 (`$QUOTH_HOME/quoth.sock`, mode 0660) is the trust boundary: its owner and group
@@ -69,13 +74,29 @@ every installed version dangling. `quoth health` fails the `quoth/venv` row in
 that case, and a monitor that runs it must treat a non-zero exit without rows
 as a failure (the command cannot start at all).
 
+## The control container (`compose/quoth-control.yaml`)
+
+The container runs the Hermes image's python from the installed venv, and a venv only starts
+at the path it was built at: its interpreter links are absolute. So the template mounts the
+install at `$QUOTH_PREFIX` and the state at `$QUOTH_HOME`, the same absolute paths inside
+the container as `install-release.sh` and the sidecar use, never at fixed container paths.
+When the host directories behind those paths differ (the install ran inside the Hermes
+container, which sees a host directory under another path), set `QUOTH_PREFIX_SOURCE` and
+`QUOTH_HOME_SOURCE` to the host directories. The WebUI gets the same install mount and reads
+the extension through `quoth-current`; after a repoint, restart `quoth-control`.
+
 ## Health
 
 `quoth health` checks every row a host monitor needs in one call: venv,
 nightly heartbeat (`$QUOTH_HOME/refresh/heartbeat.json`), sidecar, review queue
 and both lanes. Exit 0: no FAIL row; 1: a FAIL row; 2: usage error; 3: WARN only,
-with `--fail-on-warn`. The sidecar's own `/v1/health` answers 503 while its
-status is red.
+with `--fail-on-warn`. The sidecar's own `/v1/health` answers 503 while it has no
+snapshot to serve, and `status: red` (200) while the pointer names a target it rejected (the
+previous snapshot keeps serving), a candidate has been pending over an hour, or the pointer
+watcher stalled. A rejected target is retried when the pointer or the file changes, or after
+15 minutes, 30 minutes, then hourly. The `quoth/sidecar` row names the reason class and a
+digest of the target, never its path, and is WARN while a configured reranker is unavailable
+(its load is retried after 1, 5 and 30 minutes, then every 30).
 
 ## Configure an accepted snapshot for MCP
 

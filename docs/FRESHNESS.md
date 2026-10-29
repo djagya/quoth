@@ -156,7 +156,14 @@ freshness, point the serving pointer (or your MCP config) at it, and verify the 
 
 `quoth refresh-nightly` automates build, gate and switch around a **serving pointer**: a
 symlink to the snapshot being served. Both `quoth mcp --db POINTER` and `quoth sidecar --db
-POINTER` follow it without a restart.
+POINTER` follow it without a restart: a watcher thread polls the pointer every few seconds,
+validates a new target (manifest, sha256, `integrity_check`) and warms it off the request
+path while the previous snapshot keeps serving, then swaps it in. A target that fails is
+rejected and not validated again until the pointer or the file changes, or 15 minutes pass
+(then 30, then hourly); the sidecar's `/v1/health` reports it as `pointer_rejected` (red)
+with a digest of the target, and a sidecar started on a bad pointer serves without evidence
+until the pointer is fixed. Requests never validate. See
+[HERMES.md](HERMES.md#snapshot-admission).
 
 ```sh
 quoth refresh-nightly --pointer "$QUOTH_HOME/staging/serving.db" --vault /abs/vault \

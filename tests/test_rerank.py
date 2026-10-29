@@ -728,3 +728,56 @@ def test_close_cancels_a_long_rerank_job(tmp_path, state_db):
     job.result(timeout=2)  # stops after the pair in flight, not 4 x 0.3 s later
     th.join(5)
     assert len(model.calls) <= 2
+
+
+def test_an_unavailable_reranker_retries_with_backoff_until_it_loads():
+    attempts = []
+
+    def flaky():
+        attempts.append(time.monotonic())
+        if len(attempts) < 3:
+            raise rerank.RerankerUnavailable("model files missing")
+        return _Fixed({})
+
+    svc = RerankService("hash-rerank", loader=flaky, retry_delays=(0.05, 0.1))
+    assert svc.wait(5) == "unavailable" and svc.model() is None
+    status = svc.status()
+    assert status["attempts"] == 1 and 0 <= status["retry_in_s"] <= 0.05
+    for _ in range(200):
+        if svc.state == "ready":
+            break
+        time.sleep(0.01)
+    assert svc.state == "ready" and svc.model() is not None and len(attempts) == 3
+    assert attempts[2] - attempts[1] >= 0.1  # the second delay, not the first again
+    status = svc.status()
+    assert status["status"] == "ready" and status["attempts"] == 3 and status["retry_in_s"] is None
+
+
+def test_the_default_backoff_is_1_5_30_minutes_then_every_30():
+    assert rerank.RETRY_DELAYS == (60.0, 300.0, 1800.0)
+    svc = RerankService("hash-rerank", loader=lambda: (_ for _ in ()).throw(OSError("missing")),
+                        retry_delays=(0.02, 3600.0))
+    assert svc.wait(5) == "unavailable"
+    for _ in range(200):
+        if svc.status()["attempts"] == 2:
+            break
+        time.sleep(0.01)
+    status = svc.status()
+    assert status["attempts"] == 2 and status["retry_in_s"] > 3000  # the last delay repeats
+    svc.stop()
+    svc._thread.join(2)
+    assert not svc._thread.is_alive()  # stop() ends the retry loop
+
+
+def test_sidecar_health_shows_the_reranker_retry(tmp_path, state_db):
+    svc = RerankService("hash-rerank", loader=lambda: (_ for _ in ()).throw(OSError("missing")),
+                        retry_delays=(3600.0,))
+    svc.wait(5)
+    app = sidecar.Quoth(ledger_path=tmp_path / "l.db", state_db=state_db, reranker=svc)
+    try:
+        status = app.health()["reranker"]
+        assert status["status"] == "unavailable" and status["attempts"] == 1
+        assert status["retry_in_s"] > 3000
+    finally:
+        app.close()
+    assert svc._stop.is_set()  # closing the sidecar stops the retry loop

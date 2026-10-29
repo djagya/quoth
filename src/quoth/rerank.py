@@ -14,8 +14,9 @@ Files live under ``<cache>/<repo>/`` with the embedder's cache (``QUOTH_MODEL_CA
 ``hash-rerank`` is a deterministic, non-semantic stand-in for tests.
 
 Nothing here is part of the index contract: no score is stored in a snapshot.
-`RerankService` loads the model off the request path and scores on the sidecar's evidence
-worker; a turn whose scores are not ready in time keeps the cosine gate.
+`RerankService` loads the model off the request path and retries a failed load with backoff.
+The sidecar scores on its own rerank worker, apart from the evidence worker, and a turn whose
+scores are not ready in time keeps the cosine gate.
 """
 from __future__ import annotations
 
@@ -221,62 +222,94 @@ def get_reranker(name: str, **kw):
     return OnnxReranker(spec, **kw)
 
 
+# Seconds before each retry of a failed load; the last delay repeats.
+RETRY_DELAYS = (60.0, 300.0, 1800.0)
+
+
 class RerankService:
     """The sidecar's reranker: loaded once in the background, never on a turn.
 
     ``model()`` returns the loaded reranker or None (still loading, or unavailable); the
     caller then keeps the cosine gate. ``budget`` bounds one turn's scoring, ``claims``
-    also scores the served dense claims. A failed load is logged once and reported by
-    ``status()``; it never fails a turn.
+    also scores the served dense claims. A failed load is logged and reported by
+    ``status()``; it never fails a turn. The loader thread retries a failed load after each
+    of ``retry_delays`` seconds in turn (1, 5 and 30 min by default, then every 30 min) until
+    it loads or ``stop()`` is called, so model files fetched later need no restart.
     """
 
     def __init__(self, name: str = DEFAULT_MODEL, *, budget: float = DEFAULT_BUDGET, claims: bool = False,
-                 max_tokens: int = MAX_TOKENS, cache_dir: str | None = None, loader=None):
+                 max_tokens: int = MAX_TOKENS, cache_dir: str | None = None, loader=None,
+                 retry_delays: tuple[float, ...] = RETRY_DELAYS):
         if name not in MODELS:
             raise ValueError(f"unknown reranker {name!r}; expected one of {sorted(MODELS)}")
+        if not retry_delays:
+            raise ValueError("retry_delays needs at least one delay")
         self.name = name
         self.budget = budget
         self.claims = claims
         self.max_tokens = max_tokens
         self.cache_dir = cache_dir
         self._loader = loader
+        self._retry_delays = tuple(retry_delays)
         self._model = None
         self._state = "loading"
         self._load_ms = None
+        self._attempts = 0
+        self._retry_at = None  # monotonic time of the next attempt while unavailable
         self._lock = threading.Lock()
         self._thread = None
+        self._settled = threading.Event()  # set once the first attempt has an outcome
+        self._stop = threading.Event()
 
-    def _load(self) -> None:
+    def _load_once(self) -> bool:
         from .cpu import embed_threads
         t0 = time.monotonic()
+        self._attempts += 1
         try:
             loader = self._loader or (lambda: get_reranker(self.name, cache_dir=self.cache_dir,
                                                            threads=embed_threads(), max_tokens=self.max_tokens))
             model = loader()
             model.score("warmup", ["warmup"])  # first run allocates; keep it off a live turn
         except RerankerUnavailable as e:  # names files, never content
-            self._state = "unavailable"
-            log.warning("reranker unavailable: %s", e)
-            return
+            log.warning("reranker unavailable (attempt %d): %s", self._attempts, e)
+            return False
         except Exception as e:
-            self._state = "unavailable"
-            log.warning("reranker %s unavailable: %s", self.name, type(e).__name__)
-            return
-        self._model, self._state = model, "ready"
+            log.warning("reranker %s unavailable (attempt %d): %s", self.name, self._attempts,
+                        type(e).__name__)
+            return False
+        self._model, self._retry_at, self._state = model, None, "ready"
         self._load_ms = round((time.monotonic() - t0) * 1000, 1)
+        return True
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            if self._load_once():
+                break
+            delay = self._retry_delays[min(self._attempts, len(self._retry_delays)) - 1]
+            self._retry_at = time.monotonic() + delay
+            self._state = "unavailable"
+            self._settled.set()
+            if self._stop.wait(delay):
+                break
+            self._state = "loading"
+        self._settled.set()
 
     def start(self) -> "RerankService":
         """Load in a background thread (sidecar startup)."""
         with self._lock:
             if self._thread is None:
-                self._thread = threading.Thread(target=self._load, name="quoth-rerank-load", daemon=True)
+                self._thread = threading.Thread(target=self._run, name="quoth-rerank-load", daemon=True)
                 self._thread.start()
         return self
 
+    def stop(self) -> None:
+        """End the retry loop (sidecar shutdown); a loaded model stays usable."""
+        self._stop.set()
+
     def wait(self, timeout: float | None = None) -> str:
-        """Load (or wait for the background load) and return the state (eval harness)."""
+        """Start the load; return the state once the first attempt has ended (eval harness)."""
         self.start()
-        self._thread.join(timeout)
+        self._settled.wait(timeout)
         return self._state
 
     def model(self):
@@ -292,7 +325,11 @@ class RerankService:
                 "budget": self.budget, "claims": self.claims, "max_tokens": self.max_tokens}
 
     def status(self) -> dict:
-        return {**self.config(), "status": self._state, "load_ms": self._load_ms}
+        retry_at = self._retry_at
+        retry_in = (max(0.0, round(retry_at - time.monotonic(), 1))
+                    if retry_at is not None and self._state == "unavailable" else None)
+        return {**self.config(), "status": self._state, "load_ms": self._load_ms,
+                "attempts": self._attempts, "retry_in_s": retry_in}
 
 
 # ------------------------------------------------------------------ flags

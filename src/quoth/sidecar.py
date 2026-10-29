@@ -256,14 +256,14 @@ class Quoth:
             queue = ledger.health(self.conn)
         snapshot = None
         if self.evidence is not None:
+            # Admission state, read without a lease: health never waits behind a turn.
             try:
-                with self.evidence.snapshot.lease() as (_, identity):
-                    snapshot = {"status": "ok", "snapshot_id": identity}
+                snapshot = self.evidence.snapshot.health()
             except Exception:
                 snapshot = {"status": "unavailable"}
         out = {"schema": SCHEMA, "version": __version__,
-               "status": "red" if queue["status"] == "red" or (snapshot or {}).get("status") ==
-               "unavailable" else "green",
+               "status": "red" if queue["status"] == "red" or (snapshot or {}).get("status")
+               not in (None, "ok") else "green",
                "ledger": {k: queue[k] for k in ("status", "reasons", "pending", "accepted_current",
                                                 "oldest_pending_age_days")},
                "evidence": snapshot or {"status": "disabled"},
@@ -872,8 +872,11 @@ class Quoth:
         query, k = _opt_str(body, "query"), _opt_int(body, "k")
         if query is None:
             raise SidecarError("invalid_evidence_request")
+        from .serving import SnapshotUnavailable
         try:
             result = self.evidence.bundle(query, 10 if k is None else k, self.model)
+        except SnapshotUnavailable as exc:
+            raise SidecarError("evidence_unavailable", 503) from exc
         except ValueError as exc:
             raise SidecarError("invalid_evidence_request") from exc
         self._log_tool("evidence_bundle", body, result)
@@ -924,6 +927,8 @@ class Quoth:
         if self._rerank_cancel is not None:
             self._rerank_cancel.set()  # a long dry-run job stops before its next pair
         self._rerank_pool.shutdown(wait=False, cancel_futures=True)
+        if self.reranker is not None:
+            self.reranker.stop()
         self.conn.close()
 
     # -------------------------------------------------------------- conversation lanes
@@ -1240,7 +1245,7 @@ def render_view(app: "Quoth", raw: str) -> str:
         lines = [f"Memory: {h['accepted_current']} accepted, {h['pending']} pending "
                  f"(oldest {h['oldest_pending_age_days'] or 0} days) — {h['status'].upper()}",
                  "Presort: " + (", ".join(f"{k} {v}" for k, v in presort.items()) or "nothing pending"),
-                 f"Vault snapshot: {snapshot.get('snapshot_id', snapshot.get('status', '?'))[:12]}",
+                 f"Vault snapshot: {(snapshot.get('snapshot_id') or '?')[:12]} ({snapshot.get('status', '?')})",
                  "Last 7 days: " + ", ".join(f"{k} {v}" for k, v in h["last_7d"].items() if v)]
         return "\n".join(lines) + "\n\n" + VIEW_HELP
     if cmd == "core":
@@ -1565,6 +1570,9 @@ def main(argv=None) -> int:
     p.add_argument("--mode", default="660",
                    help="socket permission bits, octal (the socket's permissions are the access control)")
     p.add_argument("--no-warm", action="store_true", help="skip background model warmup")
+    p.add_argument("--snapshot-watch-interval", type=float, default=5.0,
+                   help="seconds between checks of the --db pointer; a new target is validated "
+                        "and warmed in the background before it is served")
     p.add_argument("--claim-sync-interval", type=float, default=60,
                    help="seconds between background embedding passes over accepted claims")
     p.add_argument("--evidence-budget", type=float, default=EVIDENCE_BUDGET,
@@ -1605,7 +1613,11 @@ def main(argv=None) -> int:
     if args.db:
         from .evidence_service import ReadOnlyEvidence
         from .serving import ServingSnapshot
-        evidence = ReadOnlyEvidence(ServingSnapshot(args.db))
+        # A bad pointer at startup is not fatal: the sidecar serves without evidence (health
+        # red, 503) and the watcher admits the snapshot once the pointer names a valid one.
+        snapshot = ServingSnapshot(args.db, require=False)
+        evidence = ReadOnlyEvidence(snapshot, warm_models=(args.model,))
+        snapshot.start_watcher(args.snapshot_watch_interval)
     episodes = _open_episodes(args.episodes, args.model, evidence, args.episodes_max_age_days)
     owner_episodes = _open_episodes(args.owner_episodes, args.model, evidence, role="owner")
     prefetch_log = None

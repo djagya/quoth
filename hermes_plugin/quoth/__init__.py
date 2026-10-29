@@ -23,6 +23,7 @@ import logging
 import os
 from pathlib import Path
 import threading
+import time
 from typing import Any
 
 from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_prompt, spawn_context_thread
@@ -41,6 +42,8 @@ AUTO_RECALL_PLATFORMS = ("telegram",)
 COMMAND = "quoth"  # chat command for the read-only views
 PREFETCH_TIMEOUT = 3.0
 TOOL_TIMEOUT = 20.0
+# An empty core block (the sidecar was down at initialize) is refetched at most this often.
+CORE_RETRY_SECONDS = 60.0
 KINDS = ["identity", "preference", "consent", "correction", "environment", "person", "taste",
          "project_state", "episode", "pointer"]
 # Bounds the sidecar enforces; the schemas state them so a call is right the first time.
@@ -247,6 +250,7 @@ class QuothMemoryProvider(MemoryProvider):
         self._platform = "cli"
         self._auto_recall = False
         self._core = ""
+        self._core_tried = float("-inf")  # monotonic time of the last /v1/core attempt
         self._status: RecallStatus | None = None
         self._lock = threading.Lock()
 
@@ -271,23 +275,44 @@ class QuothMemoryProvider(MemoryProvider):
         self._platform = kwargs.get("platform") or "cli"
         self._auto_recall = (self._context == "primary"
                              and self._platform in _auto_recall_platforms(kwargs.get("hermes_home")))
+        self._core = ""
+        self._core_tried = float("-inf")
+        if not self._fetch_core():
+            logger.warning("quoth sidecar unavailable at startup; core block empty, retrying")
+
+    def _fetch_core(self) -> bool:
+        """Fetch the core block; False when the sidecar did not answer with one."""
+        self._core_tried = time.monotonic()
         try:
             reply = self._client.get("/v1/core", timeout=PREFETCH_TIMEOUT)
-            self._core = reply.get("text", "") if reply.get("ok") else ""
         except SidecarUnavailable:
-            logger.warning("quoth sidecar unavailable at startup; core block empty")
-            self._core = ""
+            return False
+        if not reply.get("ok"):
+            return False
+        self._core = reply.get("text", "") or ""
+        return True
+
+    def _refresh_core(self) -> None:
+        """Refetch an empty core (sidecar down at initialize), at most once per CORE_RETRY_SECONDS."""
+        if self._client is None or self._core.strip():
+            return
+        with self._lock:
+            if time.monotonic() - self._core_tried < CORE_RETRY_SECONDS:
+                return
+            self._fetch_core()
 
     def on_session_switch(self, new_session_id: str, **kwargs) -> None:
         self._session_id = new_session_id or self._session_id
 
     def system_prompt_block(self) -> str:
+        self._refresh_core()
         return (self._core.strip() + "\n\n" + GUIDE) if self._core.strip() else GUIDE
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if session_id:
             self._session_id = session_id
         self._status = None
+        self._refresh_core()
         if self._client is None or not self._auto_recall or is_trivial_prompt(query):
             return ""
         try:
@@ -297,8 +322,8 @@ class QuothMemoryProvider(MemoryProvider):
             return ""
         if not reply.get("ok") or not reply.get("text"):
             return ""
-        self._status = RecallStatus("Quoth", int(reply.get("claims", 0)) + int(reply.get("evidence", 0))
-                                    + int(reply.get("episodes", 0)))
+        self._status = RecallStatus("Quoth", sum(int(reply.get(k) or 0) for k in
+                                                 ("claims", "evidence", "episodes", "owner_episodes")))
         return reply["text"]
 
     def recall_status(self) -> RecallStatus | None:

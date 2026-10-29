@@ -3,6 +3,30 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
+## Unreleased
+
+- **Snapshot admission off the request path.** A pointer is watched by a background thread
+  that validates and warms a new target while the admitted snapshot keeps serving, then swaps
+  it in; request leases never validate. Before, a rejected target was revalidated (sha256 and
+  `integrity_check`, about 4.5 s on a 363 MB snapshot) on every lease, and a good one was
+  swapped in cold inside a turn. A rejected target is remembered until the pointer or the
+  file changes, or 15 minutes pass (then 30, then hourly).
+- **Health tells a rejected pointer apart.** `/v1/health` reports `evidence.status`
+  `pointer_rejected`, `candidate_stalled` (over an hour) or `watcher_stalled` as red, with the
+  reason class and a digest of the target; `quoth health` names them in the `quoth/sidecar` row.
+- **A bad pointer at startup no longer crash-loops the sidecar.** It serves claims without
+  evidence (health 503) until the watcher admits a valid target. New flag
+  `--snapshot-watch-interval` (default 5 s).
+- **The reranker retries a failed load** after 1, 5 and 30 minutes, then every 30 minutes;
+  `reranker` in `/v1/health` carries `attempts` and `retry_in_s`, and `quoth health` warns
+  while it is unavailable.
+- **Plugin:** the recall status count includes the owner lane, and an empty core block (the
+  sidecar was down when the session started) is refetched at most once a minute.
+- **Deploy:** the sidecar s6 template enables the record-only prefetch log under
+  `$QUOTH_HOME/prefetch-log` (30 days). The control Compose template mounts the install and
+  state at their own absolute paths (`QUOTH_PREFIX`, `QUOTH_HOME`, with optional
+  `*_SOURCE` host directories), since a venv does not start at another path.
+
 ## 0.15.0 — first public release
 
 quoth is local evidence memory for a personal AI assistant. It indexes a Markdown vault into

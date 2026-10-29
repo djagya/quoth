@@ -134,22 +134,29 @@ def test_cache_dropped_on_pointer_swap(db, tmp_path):
         serving_cache.state(old).matrix("hash-ngram")
         assert old in serving_cache._STATE
     replace_pointer(pointer, second)
+    with snap.lease() as (same, identity):  # leases never swap: the watcher does
+        assert same is old and identity == sha(db)
+    assert snap.poll() == "admitted"
     with snap.lease() as (new, identity):
         assert identity == sha(second)
         assert old not in serving_cache._STATE
     snap.close()
     assert new not in serving_cache._STATE
 
-    # Through the tool: the post-swap answer is the successor's, not a stale cache.
+    # Through the tool: the watcher swaps, and the answer is the successor's, not a stale cache.
     pointer.unlink()
     pointer.symlink_to(db)
-    fn = _tool(build_server(str(pointer)))
+    fn = _tool(build_server(str(pointer), warm_models=("hash-ngram",), watch_interval=0.05))
     assert fn(query="tomatoes basil", k=3, model="hash-ngram") == _expected(
         db, "tomatoes basil", 3, sha(db))
     replace_pointer(pointer, second)
-    out = fn(query="tomatoes basil", k=3, model="hash-ngram")
-    assert out == _expected(second, "tomatoes basil", 3, sha(second))
-    assert "successor" in out
+    expected = _expected(second, "tomatoes basil", 3, sha(second))
+    for _ in range(200):
+        out = fn(query="tomatoes basil", k=3, model="hash-ngram")
+        if out == expected:
+            break
+        threading.Event().wait(0.05)
+    assert out == expected and "successor" in out
 
 
 def test_foreign_commit_resets_plain_read_only_cache(db):

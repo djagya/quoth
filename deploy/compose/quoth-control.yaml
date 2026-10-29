@@ -9,29 +9,36 @@
 #
 # Host variables (all required, fail closed; put them in the stack's .env):
 #   QUOTH_IMAGE          the pinned Hermes image, by digest (same as the hermes service)
-#   QUOTH_PREFIX         host directory holding quoth-X.Y.Z/ and quoth-current
-#                        (the --prefix of deploy/install-release.sh)
-#   QUOTH_HOME           host directory of quoth's state (socket, refresh/)
+#   QUOTH_PREFIX         absolute directory holding quoth-X.Y.Z/ and quoth-current, as
+#                        install-release.sh saw it (its --prefix)
+#   QUOTH_HOME           absolute directory of quoth's state (socket, refresh/), as the
+#                        sidecar sees it
 #   QUOTH_PYTHON         interpreter dir name inside the venv, e.g. python3.13
 #   WEBUI_STATE_VOLUME   the WebUI's named state volume (holds sidecar-auth/)
 #   HERMES_IMAGE_VOLUME  the data VOLUME the Hermes image declares; masked here
-# Optional: HERMES_UID / HERMES_GID (default 1000), QUOTH_TOKEN_NAME (default
-# quoth: the token the WebUI mints for the extension id "quoth").
+# Optional: QUOTH_PREFIX_SOURCE / QUOTH_HOME_SOURCE, the host directories behind
+# those paths when they differ (e.g. the install ran inside the Hermes container,
+# which sees a host directory at another path; default: the same path),
+# HERMES_UID / HERMES_GID (default 1000), QUOTH_TOKEN_NAME (default quoth: the
+# token the WebUI mints for the extension id "quoth").
 #
-# Inside the container the install is /quoth/venvs and the state /quoth/state.
+# Same path inside as at install: a venv's interpreter links and quoth-current's
+# target are absolute or prefix-relative paths fixed when the venv was built, so
+# the install is mounted at exactly $QUOTH_PREFIX (and the state at $QUOTH_HOME)
+# in both containers. Mounted anywhere else, the interpreter does not start.
 # Use: docker compose -f compose.yaml -f deploy/compose/quoth-control.yaml up -d
-# After `install-release.sh` moves quoth-current, recreate both services
-# (`up -d --force-recreate hermes-webui quoth-control`): bind sources are
-# resolved when a container is created.
+# After `install-release.sh` moves quoth-current, restart quoth-control so it
+# execs the new version; the WebUI reads the extension through the same link.
 services:
   hermes-webui:
     environment:
-      HERMES_WEBUI_EXTENSION_DIR: /quoth/extension
+      HERMES_WEBUI_EXTENSION_DIR: ${QUOTH_PREFIX:?}/quoth-current/lib/${QUOTH_PYTHON:?}/site-packages/quoth/_webui_extension
       HERMES_WEBUI_EXTENSION_MANIFEST: extensions.json
       HERMES_SKIP_CHMOD: "1"
     volumes:
-      # extensions.json + quoth/{boot.js,control.css}, straight from the installed wheel.
-      - ${QUOTH_PREFIX:?}/quoth-current/lib/${QUOTH_PYTHON:?}/site-packages/quoth/_webui_extension:/quoth/extension:ro
+      # extensions.json + quoth/{boot.js,control.css}, straight from the installed wheel
+      # (HERMES_WEBUI_EXTENSION_DIR above), through quoth-current.
+      - ${QUOTH_PREFIX_SOURCE:-${QUOTH_PREFIX:?}}:${QUOTH_PREFIX:?}:ro
 
   quoth-control:
     image: ${QUOTH_IMAGE:?pinned Hermes image digest}
@@ -48,25 +55,26 @@ services:
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
-      QUOTH_HOME: /quoth/state
-    entrypoint: ["/quoth/venvs/quoth-current/bin/python", "-m", "quoth.control"]
+      QUOTH_HOME: ${QUOTH_HOME:?}
+    entrypoint: ["${QUOTH_PREFIX:?}/quoth-current/bin/python", "-m", "quoth.control"]
     # Memory views only (no lab snapshot). The ledger and core come from the
     # sidecar over its socket; this container never opens ledger.db.
     command:
       - --token-file
       - /run/webui-sidecar-auth/${QUOTH_TOKEN_NAME:-quoth}.token
       - --quoth-socket
-      - /quoth/state/quoth.sock
+      - ${QUOTH_HOME:?}/quoth.sock
       - --nightly-receipts
-      - /quoth/state/refresh/receipts
+      - ${QUOTH_HOME:?}/refresh/receipts
       - --heartbeat
-      - /quoth/state/refresh/heartbeat.json
+      - ${QUOTH_HOME:?}/refresh/heartbeat.json
     volumes:
-      - ${QUOTH_PREFIX:?}:/quoth/venvs:ro
+      # The install at the path it was built at (see the header).
+      - ${QUOTH_PREFIX_SOURCE:-${QUOTH_PREFIX:?}}:${QUOTH_PREFIX:?}:ro
       # The whole state directory, read-only: the socket lives here and the
       # sidecar recreates it on every restart (a file-level bind would go stale).
       # Nothing in this process opens the ledger or lane DBs (socket mode).
-      - ${QUOTH_HOME:?}:/quoth/state:ro
+      - ${QUOTH_HOME_SOURCE:-${QUOTH_HOME:?}}:${QUOTH_HOME:?}:ro
       # The subpath must exist before this container is created; the WebUI
       # creates it on consent/mint. Never mount the whole WebUI state here.
       - type: volume
