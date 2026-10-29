@@ -1,0 +1,33 @@
+<!doctype html>
+<!-- Local preview of the Quoth WebUI extension with a mocked sidecar. Synthetic data only.
+     Serve the repo root (python -m http.server) and open /tests/webui-preview/?scenario=rich
+     Query: scenario=rich|empty|error|slow; theme=dark|light (the WebUI's `.dark` on :root; default:
+     the OS setting); host=webui (default: the WebUI's own variables) or host=bare (no variables). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quoth preview</title>
+<link rel="stylesheet" href="../../web/control-surface/quoth/control.css">
+<style>
+  /* Stand-ins for the Hermes WebUI's variables. --bg is measured on the real WebUI; the rest are
+     plausible values with the same names. */
+  :root.webui { --bg:#FEFCF7; --main-bg:#FEFCF7; --surface:#FFFFFF; --surface-subtle:#F7F3EA; --text:#1F1D1A;
+    --accent:#6B5BD6; --accent-text:#FFFFFF; --border:#ECE6D9; --border2:#DCD4C3; --topbar-bg:#FBF8F1;
+    --input-bg:#FFFFFF; --hover-bg:#F3EEE3; }
+  :root.webui.dark { --bg:#0D0D1A; --main-bg:#0D0D1A; --surface:#15152A; --surface-subtle:#111122; --text:#E6E6F0;
+    --accent:#8B7CF6; --accent-text:#FFFFFF; --border:#24243A; --border2:#30304A; --topbar-bg:#11111F;
+    --input-bg:#15152A; --hover-bg:#1C1C33; }
+  body { margin:0; font:15px/1.5 system-ui, sans-serif; background:var(--bg, #ddd); color:var(--text, #222); }
+  .fake-webui header { padding:.8rem 2rem; background:var(--topbar-bg, #ccc); border-bottom:1px solid var(--border, #bbb); }
+  .fake-webui main { padding:2rem; max-width:50rem; }
+  .fake-webui p { opacity:.7; }
+</style>
+</head>
+<body>
+<div class="fake-webui"><header>Hermes WebUI</header><main><p>Chat transcript placeholder (synthetic preview page).</p></main></div>
+<script src="mock.js"></script>
+<script src="../../web/control-surface/quoth/boot.js"></script>
+<script>window.__quothPreviewOpen();</script>
+</body>
+</html>

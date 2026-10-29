@@ -1,0 +1,10 @@
+.worktrees/
+.venv/
+__pycache__/
+*.db
+.scratch/
+dist/
+.claude/worktrees/
+
+# Local Claude Code settings
+.claude/

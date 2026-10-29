@@ -1,0 +1,380 @@
+# Hermes integration: the plugin and the sidecar
+
+quoth plugs into the Hermes agent as a memory provider. Two pieces ship in the same wheel
+and must come from the same release:
+
+- **`quoth sidecar`**, a long-running process that loads BGE-M3 once and owns the ledger,
+  the serving snapshot and the episode lanes;
+- **the `quoth` plugin**, a stdlib-only provider inside the Hermes gateway that talks to
+  the sidecar over a Unix socket.
+
+```
+Hermes gateway                               quoth sidecar
+┌──────────────────────────────┐   Unix     ┌──────────────────────────────────────┐
+│ plugins/quoth (stdlib only)  │  socket    │ ledger.db          reviewed claims   │
+│  system_prompt_block ─ core  ├──────────► │ core/core.md       published core    │
+│  prefetch ─────────── recall │ JSON/HTTP  │ serving snapshot   vault evidence    │
+│  tools: propose_claim,       │            │ BGE-M3 (ONNX)      query embedding   │
+│   review_claims,             │            │ Hermes state.db    read-only         │
+│   evidence_bundle,           │            │ episodes.db        assistant lane    │
+│   episode_search             │            │ owner-episodes.db  owner lane        │
+│  /quoth command              │            └──────────────────────────────────────┘
+└──────────────────────────────┘
+```
+
+## Install
+
+```sh
+quoth hermes-plugin install --hermes-home "$HERMES_HOME"     # add --force to upgrade in place
+quoth sidecar --db "$QUOTH_HOME/staging/serving.db" \
+  --core-dir "$QUOTH_HOME/core" \
+  --episodes "$QUOTH_HOME/episodes.db" \
+  --owner-episodes "$QUOTH_HOME/owner-episodes.db"
+```
+
+Then set `memory.provider: quoth` in the Hermes config. `hermes-plugin install` copies the
+plugin and its skills into `$HERMES_HOME/plugins/quoth/`; `quoth hermes-plugin path
+[--skills | --webui-extension]` prints where the packaged copies live.
+
+The plugin ships two skills:
+
+| Skill | Use |
+|---|---|
+| `memory-review` | the guided review loop over the pending queue, run in the owner's chat |
+| `memory-caller` | when and how to call the evidence tools and cite them |
+
+List their directory once in the Hermes config so they are indexed like local skills (they
+stay read-only, and a local skill with the same name wins):
+
+```yaml
+skills:
+  external_dirs:
+    - <HERMES_HOME>/plugins/quoth/skills
+```
+
+Supervise the sidecar like the gateway (an s6 template is in
+[`deploy/`](../deploy/README.md)). On start it replaces a stale socket left by a dead
+process; if another sidecar is listening on the socket it exits.
+
+### Socket resolution (plugin)
+
+1. `QUOTH_SOCKET`, if set;
+2. else `{"socket": "..."}` in `$HERMES_HOME/quoth.json` (what the provider's setup saves);
+3. else `$QUOTH_HOME/quoth.sock`, with `QUOTH_HOME` defaulting to `$XDG_DATA_HOME/quoth`,
+   else `~/.local/share/quoth` (the sidecar's own default).
+
+While the socket is missing, the plugin reports itself unavailable and Hermes falls back to
+its built-in memory.
+
+### Plugin configuration (`$HERMES_HOME/quoth.json`)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `socket` | `$QUOTH_HOME/quoth.sock` | the sidecar socket |
+| `auto_recall_platforms` | `["telegram"]` | platforms whose primary sessions get automatic recall |
+
+## Trust model
+
+The sidecar listens only on its Unix socket. There is no authentication on top: **the
+socket's file permissions are the trust boundary.** Any process that can connect (its
+owner and group; mode 0660 by default, set with `--mode`) can read memory and propose
+claims. Run the sidecar and the gateway with a shared group, keep the socket's directory
+closed to everyone else, and do not expose it through a container mount you do not
+control. The sidecar never logs request content.
+
+Authorship never comes from the caller:
+
+- a claim is `owner_statement` only when its `quote` is found in an owner-authored message
+  of the calling session in Hermes `state.db`;
+- a review decision needs `approval_quote`: the owner's reply that opened the current turn,
+  verified the same way;
+- every review request must state its `context`, and decisions are refused outside
+  `primary`.
+
+Quote checks and both lanes currently read only sessions whose Hermes source is `telegram`.
+
+## What the plugin does
+
+| Hermes hook | Sidecar route | Behaviour |
+|---|---|---|
+| `system_prompt_block` | `GET /v1/core` | the published core block (or a live compile) plus short tool guidance, fetched at session start |
+| `prefetch` | `POST /v1/prefetch` | recall for the turn (below); only in primary sessions on an auto-recall platform, and not for trivial prompts |
+| `propose_claim` tool | `POST /v1/propose` | records a pending claim |
+| `review_claims` tool | `POST /v1/review` | reads the queue, presorts, applies the owner's decisions |
+| `evidence_bundle` tool | `POST /v1/evidence` | the same evidence as the MCP tool, byte for byte |
+| `episode_search` tool | `POST /v1/episodes` | searches earlier chats: the assistant's words or the owner's |
+| `on_memory_write` | `POST /v1/mirror` | Hermes built-in MEMORY/USER `add`/`replace` become pending `imported` claims; `remove` is ignored |
+| `/quoth` command | `POST /v1/view` | read-only text views (below) |
+
+`sync_turn` only tracks the session id. Prefetch uses a 3-second timeout, tools 20 seconds.
+Scheduled, delegated and other non-primary runs get no automatic recall; the tools stay
+available there, and the guide tells the model to use them only when the owner asked.
+
+### Tools
+
+**`propose_claim`**: `text` (1–600 characters, third person about the owner), `kind`, and
+`reason` are required. Optional: `quote` (8–500 characters, the owner's exact words in this
+chat), `agreement_quote` (the owner's words agreeing to the assistant's recommendation;
+recorded as the assistant's proposal and always reviewed), `subject_key` (a stable slot such
+as `home_city`), `supersedes` (claim id), `confidence` (0–1). Returns the reconcile
+`decision` (`add`, `noop_duplicate`, `replace_pending`, `supersede_proposed`),
+`auto_accepted`, the claim and up to 3 `closest` claims. Kinds: `identity`, `preference`,
+`consent`, `correction`, `environment`, `person`, `taste`, `project_state`, `episode`,
+`pointer`. See [LEDGER.md](LEDGER.md).
+
+**`review_claims`**: `action` is one of:
+
+| Action | Approval | Fields |
+|---|---|---|
+| `queue` | no | `suggested` (false = unsorted only), `offset`, `limit` (1–50) |
+| `summary` | no | – |
+| `digest` | no | `topic` or `bucket`, `limit` |
+| `assist` | no | `ids` or `offset` |
+| `suggest` | no | `id`, `suggestion` (`accept`, `reject`, `duplicate`, `stale`, `keep`, `covered`), `kind`, `topic` (≤ 40), `text` (rewrite), `duplicate_of`, `evidence_locator` (≤ 300), `note` |
+| `apply` | yes | `ids` (≤ 200), or `bucket` (`duplicate`, `covered`, `stale`, `reject`) with `bucket_stamp` |
+| `accept`, `reject` | yes | `ids` (≤ 50) |
+| `edit` | yes | one `id`, `text` and/or `kind` |
+| `forget` | yes | one accepted `id`, `reason` |
+| `undo_auto` | yes | one `id` |
+| `undo` | yes | – (reverts what the owner's previous message decided) |
+
+Decisions carry `approval_quote`, the owner's whole reply in this turn, verbatim. The
+review grammar and its rules are in [LEDGER.md](LEDGER.md#guided-review).
+
+**`evidence_bundle`**: `query` (1–2048 characters), `k` (1–20, default 10). Same output as
+the [MCP tool](MCP.md#output).
+
+**`episode_search`**: `query` (1–2048), `k` (1–20, default 5), `who` (`assistant`, the
+default, or `owner`). Returns `{origin, answer_use, model, hits}`; each hit has `origin`,
+`authority` (`none` for the assistant's words, `unreviewed` for the owner's), `locator`
+(`hermes:<session>:<message>`), `session_id`, `message_id`, `timestamp`, `score` and `text`.
+
+### `/quoth` command
+
+Read-only, rendered by the sidecar and cut to fit one chat message (3,800 characters). It is
+`/quoth`, not `/memory`, because Hermes has a built-in `/memory`.
+
+| Command | Shows |
+|---|---|
+| `/quoth` | accepted and pending counts, oldest pending, presort summary, snapshot, 7-day activity |
+| `/quoth core` | the core block the assistant loads |
+| `/quoth queue` | the review digest: counts by suggestion and by topic, the clean-up plan |
+| `/quoth queue <topic or suggestion>` | one group as `#id text — suggestion` |
+| `/quoth item N` | one claim: origin, quote check, validity, what it replaced, history |
+| `/quoth find words` | every claim (any status) containing the words |
+| `/quoth recall text` | what prefetch would inject for this text, with scores (dry run) |
+
+Decisions still go through the chat (`review_claims` with the owner's reply).
+
+## Recall (`/v1/prefetch`)
+
+For each turn the sidecar builds one `<quoth-recall>` block:
+
+1. **Search text.** The owner's authored payload only: Hermes' sender tag, reply context
+   and attachment captions are stripped, injected turns (scheduled deliveries, notices)
+   skip recall entirely, and the text is capped at 1,000 characters.
+2. **Claims.** Up to 6 accepted, current claims: meaning matches first (BGE-M3 cosine ≥ 0.5
+   over an in-memory index of accepted claims), then word matches.
+3. **Vault evidence.** The top 3 hits, if they are ready within `--evidence-budget`
+   (1.5 s). Otherwise the turn gets claims only (`evidence_status: slow`) while the search
+   finishes in the background and warms the caches; later turns skip evidence (`busy`)
+   instead of queueing behind it.
+4. **Lanes.** Up to 2 excerpts (240 characters) per enabled lane at or above its cosine
+   floor (0.62), from what is left of the evidence budget, excluding the current session.
+   The owner lane is on by default, the assistant lane off.
+5. **Relevance gate.** Off by default. With thresholds set, weak vault hits and claims are
+   dropped, and a turn with nothing relevant gets no vault section. An optional
+   cross-encoder can decide instead of cosine. Thresholds and how to choose them:
+   [EVAL.md](EVAL.md#relevance-gate-and-eval-sweep).
+
+Injected claims are marked used (`use_count`, `last_used_at`), which orders the core block.
+Background work (lane ingest and embedding, claim indexing, review assist) yields to live
+turns.
+
+## Sidecar flags
+
+Paths default under `$QUOTH_HOME`; the Hermes `state.db` under `$HERMES_HOME`.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--socket PATH` | `$QUOTH_HOME/quoth.sock` | socket to listen on |
+| `--mode OCTAL` | `660` | socket permission bits (the access control) |
+| `--ledger PATH` | `$QUOTH_HOME/ledger.db` | the claim ledger (created and migrated if missing) |
+| `--state-db PATH` | `$HERMES_HOME/state.db` | Hermes chat history, read-only; `''` disables quote checks and owner-authored claims |
+| `--db PATH` | off | serving snapshot or pointer; omit to run without vault evidence |
+| `--core-dir DIR` | off | published core directory (`core.md`); without it `/v1/core` compiles live |
+| `--model NAME` | `bge-m3` | query embedder |
+| `--no-warm` | off | skip the background model warm-up |
+| `--claim-sync-interval S` | 60 | seconds between claim-index passes |
+| `--evidence-budget S` | 1.5 | how long prefetch waits for vault evidence |
+| `--episodes PATH` | off | assistant lane DB (e.g. `$QUOTH_HOME/episodes.db`) |
+| `--episodes-prefetch on\|off` | `off` | inject the assistant's earlier words into recall |
+| `--episodes-max-age-days N` | all | embed only replies newer than N days |
+| `--owner-episodes PATH` | off | owner lane DB (e.g. `$QUOTH_HOME/owner-episodes.db`) |
+| `--owner-prefetch on\|off` | `on` | inject the owner's earlier words into recall |
+| `--owner-min-score X` | 0.62 | cosine floor for owner-lane excerpts |
+| `--episodes-interval S` | 300 | seconds between background lane ticks |
+| `--episodes-tick-seconds S` | 60 | CPU budget of one lane tick |
+| `--prefetch-log DIR` | off | privacy-safe JSON line per turn and per search tool call ([EVAL.md](EVAL.md#online-measurement-the-prefetch-log)) |
+| `--prefetch-log-days N` | 30 | prune log files older than N days |
+| `--vault-min-cosine`, `--vault-max-gap`, `--vault-lexical-rescue`, `--claims-min-cosine`, `--claims-min-lexical` | off | relevance gate |
+| `--rerank-model`, `--rerank-budget`, `--rerank-claims`, `--rerank-max-tokens`, `--vault-min-rerank`, `--vault-max-rerank-gap`, `--vault-rerank-widen`, `--claims-min-rerank` | off | cross-encoder reranker |
+
+Embedding threads follow the container's CPU quota (cgroup `cpu.max`) minus headroom;
+`QUOTH_EMBED_THREADS=N` overrides.
+
+## HTTP API (`quoth-sidecar/v1`)
+
+JSON over HTTP/1.0 on the Unix socket. Request bodies are JSON objects. Routing ignores the
+query string.
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| GET | `/v1/health` | – | status of the sidecar, snapshot, ledger queue, lanes, gate, reranker |
+| GET | `/v1/core` | – | `{source, file, text}`: the published core, or `source: "live"` |
+| POST | `/v1/prefetch` | `{query, session_id}` | `{text, claims, evidence, evidence_status, ...}` |
+| POST | `/v1/propose` | `{text, kind, reason, quote?, agreement_quote?, subject_key?, supersedes?, confidence?, session_id, proposer?}` | `{decision, auto_accepted, claim, closest}` |
+| POST | `/v1/review` | `{action, context, session_id, approval_quote?, ...}` | per action |
+| POST | `/v1/evidence` | `{query, k?, session_id?}` | the evidence bundle |
+| POST | `/v1/mirror` | `{action, target, content}` | `{decision, claim_id}` or `{decision: "ignored"}` |
+| POST | `/v1/view` | `{args}` | `{text}` for `/quoth` |
+| POST | `/v1/episodes` | `{query, k?, who?, session_id?}` | `{origin, answer_use, model, hits}` |
+| POST | `/v1/ledger-view` | `{view, ...}` | `{view}`: `claims`, `claim`, `queue`, `core` or `core_version`, over a separate read-only connection |
+
+Every success is `{"ok": true, ...}`. Every error is `{"ok": false, "error": "<code>"}` with
+a stable code that never contains paths or content.
+
+| Status | When | Example codes |
+|---|---|---|
+| 200 | success | – |
+| 400 | refused request | `invalid_length` (non-integer or negative `Content-Length`), `invalid_json`, `invalid_<field>` (wrong type), `context_required`, `review_requires_primary_session`, `approval_quote_required`, `approval_quote_not_found`, `approval_not_for_action`, `unknown_action`, `invalid_evidence_request`, `invalid_episodes_request`, ledger refusals |
+| 404 | unknown path | `not_found` |
+| 405 | known path, wrong method (any method, including `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`); carries an `Allow` header | `method_not_allowed` |
+| 409 | another review assist is running | `assist_busy` |
+| 413 | body over 64 KiB | `body_too_large` |
+| 500 | unexpected failure (logged without content) | `internal` |
+| 503 | a component is not configured, or `/v1/health` cannot open the snapshot | `state_db_unconfigured`, `evidence_unconfigured`, `episodes_unconfigured`, `ledger_unavailable`, `assist_unavailable`, `unhealthy` |
+
+Integer fields are clamped to their range (`max(lo, min(n, hi))`); for example `limit` is
+1–50. `Content-Length` is checked before the body is read, and after a 400
+`invalid_length` or a 413 the connection is closed.
+
+### `/v1/health`
+
+```json
+{"ok": true, "schema": "quoth-sidecar/v1", "version": "0.15.0", "status": "green",
+ "ledger": {"status": "green", "reasons": [], "pending": 2, "accepted_current": 10,
+            "oldest_pending_age_days": 0.0},
+ "evidence": {"status": "ok", "snapshot_id": "<sha256>"},
+ "quote_verification": true,
+ "episodes": {"status": "green", "reasons": [], "messages": 4, "embedded": 4, "pending": 0,
+              "newest": "…", "last_tick_at": "…", "prefetch": false},
+ "owner_episodes": {"…": "same shape"},
+ "relevance_gate": {"vault_min_cosine": null, "…": null, "vault_on": false, "claims_on": false}}
+```
+
+`status` is `red` when the ledger queue is red (more than 40 pending, or the oldest older
+than 14 days) or the snapshot cannot be opened. Only an unavailable snapshot answers **503**
+(`"ok": false, "error": "unhealthy"` plus the same fields), so a monitor's status-code alarm
+means "cannot serve evidence"; a review backlog stays 200 with `status: red` in the body. `evidence.status` is `ok`, `unavailable` or `disabled`; a lane
+block is `{"status": "disabled"}` when the lane is off; `reranker` appears only with
+`--rerank-model`.
+
+### `/v1/prefetch`
+
+| Field | Default | Meaning |
+|---|---|---|
+| `query` | – | the incoming message |
+| `session_id` | `""` | the calling session (excluded from lane hits) |
+| `dry_run` | false | score without marking claims used; adds `detail` (claims, evidence, candidates, status, timings) |
+| `k_evidence` | 3 | vault hits served (0–20) |
+| `k_claims` | 6 | claims served (1–20) |
+| `k_candidates` | 0 | dry run only: deeper candidate lists per store (0–20) |
+| `evidence_budget`, `rerank_budget` | sidecar's | dry run only, seconds, capped at 120 |
+
+Response: `text` (the recall block, or `""`), `claims`, `evidence`, `evidence_status` (`ok`,
+`slow`, `busy`, `unavailable`, `disabled`, `skipped`), and per enabled lane `episodes` /
+`episodes_status` and `owner_episodes` / `owner_episodes_status`.
+
+## Episode lanes
+
+Two searchable records of earlier chats, each in its own small SQLite file with its own
+schema, watermark and health block. Neither touches the snapshot or the ledger, and neither
+becomes a claim by itself.
+
+| Lane | Flag | `who` | Holds | Authority | Recall default |
+|---|---|---|---|---|---|
+| assistant | `--episodes` | `assistant` | what the assistant said | `none` | off (tool only) |
+| owner | `--owner-episodes` | `owner` | what the owner wrote | `unreviewed` | on |
+
+- **Ingest.** Hermes `state.db` opened read-only. Rows of the lane's role in Telegram
+  sessions, active or compaction originals, newer than the stored watermark. Transport
+  envelopes are unwrapped, `<think>` blocks dropped, credentials redacted, and empty,
+  tool-call-only or very short replies skipped. The owner lane keeps only owner-authored
+  payload (quoted replies of the assistant, captions and synthetic runtime messages are
+  dropped, failing closed). Each message is split into about 1,200-character chunks with 200
+  of overlap.
+- **Embedding.** A background tick every `--episodes-interval` seconds ingests, then embeds
+  for at most `--episodes-tick-seconds`, newest messages first. The lanes tick one at a time
+  and pause between small batches while live queries arrive.
+- **Search.** Brute-force cosine over the stored vectors, one hit per message (its best
+  chunk). The matrix is cached until the rows change.
+- **Health.** A lane is red when its tick never ran, last failed (`error:<code>`) or is older
+  than three intervals.
+- A lane DB records its role and refuses to be opened as the other one. It can be deleted and
+  rebuilt from `state.db` at any time.
+
+To keep something the owner agreed to, the assistant proposes it with `agreement_quote`;
+it is recorded as the assistant's proposal with the verified locator and waits for review.
+
+```sh
+quoth episodes ingest                              # assistant lane, $QUOTH_HOME/episodes.db
+quoth episodes --role owner ingest                 # owner lane, $QUOTH_HOME/owner-episodes.db
+quoth episodes search "balcony tomatoes" -k 5
+quoth episodes stats
+quoth episodes health --interval 300               # exit 1 when red
+```
+
+`ingest` embeds every pending chunk unless `--max-chunks N` is given (`0` = ingest only).
+`--max-age-days N` embeds only the last N days.
+
+## WebUI memory panel
+
+`web/control-surface/` is an extension for the Hermes WebUI: an overview (what waits for
+review, what the assistant knows, health), the ledger, the review queue, the core block and
+its versions, a recall playground, episode search and refresh history. It has no decision
+buttons: the queue view drafts the reply the owner sends in chat ("ok, drop 3 5"), and that
+reply stays the approval.
+
+It is served by a loopback control process:
+
+```sh
+python -m quoth.control --token-file <webui sidecar-auth>/quoth.token \
+  --quoth-socket "$QUOTH_HOME/quoth.sock" \
+  --nightly-receipts "$QUOTH_HOME/refresh/receipts" [--port 17889]
+```
+
+- It binds `127.0.0.1` (port 17889) inside the WebUI's network namespace; the WebUI proxies
+  the extension to it and checks the WebUI's per-extension token file on every request.
+  Token bytes never go on a command line.
+- With `--quoth-socket` alone, ledger and core views come from the sidecar's
+  `/v1/ledger-view`, so the control process never opens `ledger.db`. Recall uses
+  `/v1/prefetch` with `dry_run: true`, and episode search `/v1/episodes`, so the panel shows
+  exactly what the assistant gets.
+- `--nightly-receipts DIR` and `--heartbeat FILE` (default `<receipts>/../heartbeat.json`)
+  add refresh history: outcomes, timings and reasons only.
+- `--ledger` and `--core-dir` read the files directly, for development.
+
+A Compose template is in [`deploy/compose/quoth-control.yaml`](../deploy/compose/quoth-control.yaml);
+`quoth hermes-plugin path --webui-extension` prints the extension directory inside the wheel.
+
+## Operations
+
+| Task | Command |
+|---|---|
+| publish the core after a review | `quoth ledger compile-core --publish "$QUOTH_HOME/core"` (new sessions pick it up) |
+| queue health | `quoth ledger health` (exit 1 when red) |
+| weekly reminder | `quoth ledger nudge` (one line when claims wait, nothing otherwise) |
+| import existing memory | `quoth ledger seed --file seed.jsonl`, then review |
+| every health row in one call | `quoth health [--json]` |
+| roll back | set `memory.provider` back to the built-in provider; the ledger file stays |

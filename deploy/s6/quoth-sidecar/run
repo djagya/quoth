@@ -1,0 +1,57 @@
+#!/bin/sh
+# TEMPLATE: s6 run script for the Quoth sidecar (the local service the
+# `quoth` memory-provider plugin talks to: core block, recall, claim
+# proposals and reviews, vault evidence, both conversation lanes, and the
+# WebUI ledger views). Unix socket only (mode 0660, owner $RUN_AS), no network
+# listener, no request content in logs. The socket's permissions are the only
+# access control: share its group only with the Hermes gateway.
+#
+# Runs from the fixed install path, so an upgrade or rollback is
+# `deploy/install-release.sh [--activate X.Y.Z]` plus a restart of this
+# service; nothing here names a version.
+set -eu
+umask 007
+
+# ---- HOST VARIABLES: edit these for your host --------------------------------
+QUOTH_PREFIX=/srv/quoth/venvs            # --prefix of install-release.sh (holds quoth-current)
+QUOTH_HOME=/srv/quoth/state              # quoth's state: ledger, lanes, core, socket, snapshots
+HERMES_HOME=/srv/hermes                  # the Hermes home; its state.db is read-only here
+QUOTH_MODEL_CACHE=$QUOTH_HOME/models     # local ONNX model files (bge-m3, reranker)
+SNAPSHOT=$QUOTH_HOME/staging/serving.db  # serving snapshot pointer (the nightly --pointer)
+LOG=/var/log/quoth/sidecar.log
+RUN_AS=hermes                            # user the gateway shares the socket with
+S6_SETUIDGID=s6-setuidgid                # full path if it is not on PATH
+EPISODES_INTERVAL=300                    # seconds between lane ticks
+EPISODES_TICK_SECONDS=60                 # CPU budget per lane tick (lanes take turns)
+# ------------------------------------------------------------------------------
+
+VENV=$QUOTH_PREFIX/quoth-current
+# Size cap, checked on every (re)start (one .1 generation kept).
+LOG_MAX_BYTES=5242880
+rotate_log() {
+  [ -f "$LOG" ] || return 0
+  size=$(wc -c <"$LOG" | tr -d " ")
+  if [ "$size" -gt "$LOG_MAX_BYTES" ]; then
+    mv -f "$LOG" "$LOG.1"
+  fi
+}
+
+mkdir -p "$QUOTH_HOME/core" "$(dirname "$LOG")"
+rotate_log
+touch "$LOG"
+chown "$RUN_AS:$RUN_AS" "$QUOTH_HOME/core" "$LOG"
+exec >>"$LOG" 2>&1
+
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] starting quoth sidecar ($(readlink "$VENV" || echo "$VENV"))"
+export PYTHONDONTWRITEBYTECODE=1
+export QUOTH_HOME HERMES_HOME QUOTH_MODEL_CACHE
+exec "$S6_SETUIDGID" "$RUN_AS" "$VENV/bin/quoth" sidecar \
+  --socket "$QUOTH_HOME/quoth.sock" \
+  --ledger "$QUOTH_HOME/ledger.db" \
+  --state-db "$HERMES_HOME/state.db" \
+  --db "$SNAPSHOT" \
+  --core-dir "$QUOTH_HOME/core" \
+  --episodes "$QUOTH_HOME/episodes.db" \
+  --owner-episodes "$QUOTH_HOME/owner-episodes.db" \
+  --episodes-interval "$EPISODES_INTERVAL" \
+  --episodes-tick-seconds "$EPISODES_TICK_SECONDS"

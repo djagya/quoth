@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/djagya/quoth/eval/schema/evalset-v1.schema.json",
+  "title": "quoth eval set v1 row",
+  "description": "One JSONL row of a quoth eval set. The sibling <set>.manifest.json follows $defs/manifest. Cross-field rules (abstain <=> no sources, unanswerable => abstain, followup => context, unique ids, answer_hint only in private sets) are checked by `quoth eval validate`; see docs/EVAL.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "question", "lang", "kind", "origin", "expect"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$"},
+    "question": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "lang": {"type": "string", "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{1,8})?$"},
+    "asked_at": {"type": ["string", "null"], "description": "ISO date (YYYY-MM-DD) or ISO datetime"},
+    "context": {
+      "type": "array",
+      "description": "Preceding turns, oldest first (for follow-ups and, later, query rewriting).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "text"],
+        "properties": {
+          "role": {"enum": ["user", "assistant"]},
+          "text": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "kind": {"enum": ["fact", "preference", "person", "project_state", "decision", "temporal",
+                      "knowledge_update", "unanswerable", "episodic", "followup"]},
+    "origin": {"enum": ["real_user", "assistant_query", "authored", "synthetic"]},
+    "expect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["abstain", "sources"],
+      "properties": {
+        "abstain": {"type": "boolean"},
+        "sources": {"type": "array", "items": {"$ref": "#/$defs/source"}},
+        "stale": {"type": "array", "items": {"$ref": "#/$defs/source"},
+                  "description": "Matches that must NOT be injected (knowledge updates)."},
+        "answer_hint": {"type": ["string", "null"], "description": "Private sets only; never printed."}
+      }
+    },
+    "tags": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "meta": {"type": "object", "description": "Source-format fields kept for round-trips (private)."}
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store", "match"],
+      "properties": {
+        "store": {"enum": ["vault", "claims", "owner", "assistant"]},
+        "match": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "path": {"type": "string", "minLength": 1, "description": "vault store only; vault-relative"},
+            "locator": {"type": "string", "minLength": 1},
+            "claim_text_contains": {"type": "string", "minLength": 1, "description": "claims store only"},
+            "subject_key": {"type": "string", "minLength": 1, "description": "claims store only"},
+            "text_contains": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "required": ["schema", "privacy", "sha256", "rows", "counts", "fixture"],
+      "properties": {
+        "schema": {"const": "quoth-evalset/v1"},
+        "privacy": {"enum": ["public", "private"]},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "rows": {"type": "integer", "minimum": 1},
+        "counts": {
+          "type": "object",
+          "required": ["kind", "origin", "lang", "abstain"],
+          "properties": {
+            "kind": {"type": "object", "additionalProperties": {"type": "integer"}},
+            "origin": {"type": "object", "additionalProperties": {"type": "integer"}},
+            "lang": {"type": "object", "additionalProperties": {"type": "integer"}},
+            "abstain": {"type": "object", "properties": {"true": {"type": "integer"}, "false": {"type": "integer"}}}
+          }
+        },
+        "fixture": {"type": "string", "minLength": 1},
+        "source": {
+          "type": "object",
+          "properties": {"format": {"enum": ["golden-v1", "golden-v3", "ledger-updates"]},
+                         "sha256": {"type": "string"}}
+        }
+      }
+    }
+  }
+}

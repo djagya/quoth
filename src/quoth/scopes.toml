@@ -1,0 +1,24 @@
+# Scope labels and ingestion exclusions.
+#
+# Every note in the vault is indexed and fully retrievable. `scope` is a metadata label
+# only: it never filters retrieval (scoped bundles use it to select what they export).
+# Rules are evaluated in order; first match wins; unmatched paths get `default`.
+# A pattern ending in "/" matches the directory and everything below it;
+# any other pattern matches that exact file path. Matching is case-sensitive.
+
+default = "general"
+
+# Informational only; retrieval never filters on scope.
+default_recall = ["general", "work"]
+
+[[rule]]
+scope = "work"
+patterns = ["WORK/"]
+
+[ingest]
+# Directory names skipped anywhere in the tree, besides every hidden directory (a name
+# starting with "."): .obsidian, .git, .trash, sync-tool version folders and agent
+# folders such as .claude are never read. Listed here: attachment folders, and
+# ASSISTANT/, a folder of assistant-written notes, excluded so the assistant's own
+# output never becomes evidence.
+exclude_dirs = ["ASSISTANT", "attachments", "Attachments", "_attachments"]

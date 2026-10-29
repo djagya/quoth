@@ -1,0 +1,27 @@
+{
+  "db_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "queries": {
+    "s01": [
+      {
+        "name": "garden bed location",
+        "requires": [
+          [
+            1,
+            "south bed"
+          ]
+        ]
+      }
+    ],
+    "s08": [
+      {
+        "name": "conventions updated date",
+        "requires": [
+          [
+            3,
+            "2026-09-12"
+          ]
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{"text": "Prefers oolong tea without sugar.", "kind": "preference", "status": "accepted"}
+{"text": "Prefers replies in short paragraphs, no bullet lists.", "kind": "preference", "status": "accepted"}
+{"text": "Orla Quenby is the climbing partner.", "kind": "person", "subject_key": "person.orla.role", "status": "accepted"}
+{"text": "Project Lantern shipped in August 2026 and is in maintenance.", "kind": "project_state", "subject_key": "project.lantern.status", "status": "accepted"}
+{"text": "Thinks about moving to Brask next year.", "kind": "episode", "status": "pending"}
+{"text": "Dislikes basil.", "kind": "taste", "status": "rejected"}
+{"text": "Platypus lives in Quendorf.", "kind": "identity", "subject_key": "platypus.city", "status": "accepted"}
+{"text": "Platypus moved to Zanzibar city.", "kind": "identity", "subject_key": "platypus.city", "status": "accepted"}
+{"text": "Platypus prefers green tea in the morning.", "kind": "preference", "subject_key": "platypus.morning_drink", "status": "accepted"}
+{"text": "Platypus prefers black coffee in the morning now.", "kind": "preference", "subject_key": "platypus.morning_drink", "status": "accepted"}
+{"text": "The build server is called anvil.", "kind": "environment", "subject_key": "env.build_server", "status": "accepted"}
+{"text": "The build server is called forge since the migration.", "kind": "environment", "subject_key": "env.build_server", "status": "accepted"}
+{"text": "The build server is called crucible after the rename.", "kind": "environment", "subject_key": "env.build_server", "status": "accepted"}
+{"text": "Zanzibar is Platypus's dentist.", "kind": "person", "subject_key": "person.zanzibar.role", "status": "accepted"}
+{"text": "Zanzibar is no longer Platypus's dentist; Quendorf is.", "kind": "person", "subject_key": "person.zanzibar.role", "status": "accepted"}
+{"text": "Project lantern is in planning.", "kind": "project_state", "subject_key": "project.lantern.state", "status": "accepted"}
+{"text": "Project lantern shipped and is in maintenance.", "kind": "project_state", "subject_key": "project.lantern.state", "status": "accepted"}
+{"text": "Never send voice replies to Platypus.", "kind": "consent", "subject_key": "consent.voice", "status": "accepted"}
+{"text": "Voice replies to Platypus are fine for short messages.", "kind": "consent", "subject_key": "consent.voice", "status": "accepted"}

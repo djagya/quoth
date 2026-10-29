@@ -1,0 +1,10 @@
+#!/bin/sh
+# s6-supervise calls finish with the exit code (256 when a signal killed run,
+# e.g. s6-svc -d / -r). Back off 30 s only after a real failure, so a crash
+# loop restarts twice a minute instead of every ~6 s, and a stop/restart is
+# not delayed. timeout-finish raises s6's 5 s finish kill so the sleep holds.
+code=${1:-1}
+if [ "$code" -ne 0 ] && [ "$code" -ne 256 ]; then
+  sleep 30
+fi
+exit 0

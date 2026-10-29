@@ -1,0 +1,9 @@
+# Gitleaks config: the default rules plus narrow allowlists for known non-secrets.
+[extend]
+useDefault = true
+
+[[allowlists]]
+condition = "AND"
+description = "Pinned sha256 digests of public reranker model files (not secrets)"
+paths = ['''^src/quoth/rerank\.py$''']
+regexes = ['''\b[0-9a-f]{64}\b''']

@@ -1,0 +1,49 @@
+# Contributing to quoth
+
+Thanks for helping. quoth holds people's private memory, so the bar is correctness and
+privacy first, features second.
+
+## Set up
+
+```bash
+uv sync
+uv run pytest -q
+```
+
+Python 3.13+ and [`uv`](https://docs.astral.sh/uv/) are required. Tests use the synthetic
+`hash-ngram` embedder, so no model files are needed. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+explains how the pieces fit together.
+
+## Before you open a pull request
+
+- Run the full test suite locally and note the result in the PR description.
+- Add or update tests for the behaviour you change.
+- Keep one change per pull request, and describe what it changes and why.
+- Bump `version` in `pyproject.toml` when the change ships in the wheel, and add a line to
+  [`CHANGELOG.md`](CHANGELOG.md).
+
+## Rules that keep snapshots valid
+
+- **Index-contract files.** Editing a file listed in `CODE_FILES` in `src/quoth/refresh.py`
+  (`chunker.py`, `db.py`, `dense.py`, `embed/backends.py`, `embed/store.py`, `entities.py`,
+  `ingest.py`, `scopes.py`, `scopes.toml`, `search.py`), `refresh.py` or `freshness.py`, or
+  any evidence-DB migration, changes the code digests, and every existing snapshot becomes
+  incompatible until it is rebuilt (`search.py` alone is serving-only and exempt). Put
+  serving-speed changes in the serving modules instead, and call out any index-contract
+  change in the PR. See [`docs/FRESHNESS.md`](docs/FRESHNESS.md).
+- **Migrations are additive.** Add a new numbered SQL file in `src/quoth/migrations/` (the
+  evidence database) or `src/quoth/ledger/migrations/` (the ledger); never edit or delete an
+  existing one.
+- **Never delete memory.** Forgetting is `valid_to` / `superseded_by`, not `DELETE`.
+- **Read-only serving stays read-only.** `quoth mcp` must expose only `evidence_bundle`.
+- **Public surfaces.** The CLI, the MCP tool, the sidecar's `/v1` API and `quoth.evals` are
+  the public API. Document changes to them in `docs/`.
+
+## Privacy
+
+Never commit a personal corpus, snapshot database, private eval data, chat history or model
+cache. Everything in `eval/` must be synthetic. CI runs a secret scan (`.gitleaks.toml`).
+
+## Reporting security issues
+
+See [`SECURITY.md`](SECURITY.md). Don't open a public issue for a vulnerability.

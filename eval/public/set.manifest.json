@@ -1,0 +1,32 @@
+{
+  "counts": {
+    "abstain": {
+      "false": 26,
+      "true": 3
+    },
+    "kind": {
+      "decision": 2,
+      "episodic": 3,
+      "fact": 4,
+      "followup": 2,
+      "knowledge_update": 6,
+      "person": 2,
+      "preference": 3,
+      "project_state": 2,
+      "temporal": 2,
+      "unanswerable": 3
+    },
+    "lang": {
+      "en": 26,
+      "ru": 3
+    },
+    "origin": {
+      "synthetic": 29
+    }
+  },
+  "fixture": "eval/public",
+  "privacy": "public",
+  "rows": 29,
+  "schema": "quoth-evalset/v1",
+  "sha256": "6bf67dbcddf5e05243f1e106ccd3057809503cce20d351bbcaf851f95e78a0a6"
+}

@@ -1,0 +1,1 @@
+{"extensions":[{"id":"quoth","name":"Quoth","scripts":["quoth/boot.js"],"stylesheets":["quoth/control.css"],"sidecar":{"type":"loopback","origin":"http://127.0.0.1:17889","health_path":"/health","proxy_auth":"token-v1"}}]}

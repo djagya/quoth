@@ -1,0 +1,38 @@
+{
+  "model": "BAAI/bge-m3",
+  "backend": "onnx (onnxruntime CPU, CLS pooling + L2 norm)",
+  "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+  "generated_at": "2026-09-23T19:08:25.785215Z",
+  "files": [
+    {
+      "file": "config.json",
+      "sha256": "26159e7ad065073448460117eb24b7a4572f6f4e78eadff65dc0a11c052449fa",
+      "bytes": 687
+    },
+    {
+      "file": "sentencepiece.bpe.model",
+      "sha256": "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865",
+      "bytes": 5069051
+    },
+    {
+      "file": "tokenizer.json",
+      "sha256": "21106b6d7dab2952c1d496fb21d5dc9db75c28ed361a05f5020bbba27810dd08",
+      "bytes": 17098108
+    },
+    {
+      "file": "tokenizer_config.json",
+      "sha256": "a62b2b6784f990259fddef5f16388693a8043be4f69179e6a5257eeb3f9abac4",
+      "bytes": 444
+    },
+    {
+      "file": "onnx/model.onnx",
+      "sha256": "f84251230831afb359ab26d9fd37d5936d4d9bb5d1d5410e66442f630f24435b",
+      "bytes": 724923
+    },
+    {
+      "file": "onnx/model.onnx_data",
+      "sha256": "1eebfb28493f67bba03ce0ef64bfdc7fc5a3bd9d7493f818bb1d78cd798416b4",
+      "bytes": 2266820608
+    }
+  ]
+}

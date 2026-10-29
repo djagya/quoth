@@ -1,0 +1,14 @@
+{"id": "s01", "question": "Where do tomatoes and basil grow?", "lang": "en", "expected_paths": ["PROJECTS/Garden.md"], "scope": "general", "kind": "fact"}
+{"id": "s02", "question": "Какие техники медитации я практикую?", "lang": "ru", "expected_paths": ["KNOWLEDGE/Медитация.md"], "scope": "general", "kind": "fact"}
+{"id": "s03", "question": "What are the top-level folder naming conventions in this vault?", "lang": "en", "expected_paths": ["Vault Conventions.md"], "scope": "general", "kind": "fact"}
+{"id": "s04", "question": "What is the plan for the ingestion pipeline this quarter?", "lang": "en", "expected_paths": ["WORK/Quarterly plan.md"], "scope": "general", "kind": "project"}
+{"id": "s05", "question": "What was written in the first journal session?", "lang": "en", "expected_paths": ["JOURNAL/Session 1.md"], "scope": "general", "kind": "person"}
+{"id": "s06", "question": "What did the latest bloodwork show?", "lang": "en", "expected_paths": ["HEALTH/Bloodwork.md"], "scope": "general", "kind": "fact"}
+{"id": "s07", "question": "О чём я мечтал в новогоднюю ночь?", "lang": "ru", "expected_paths": ["ME/dreams/2026-01-01.md"], "scope": "general", "kind": "temporal"}
+{"id": "s08", "question": "When was the Vault Conventions note last updated?", "lang": "en", "expected_paths": ["Vault Conventions.md"], "scope": "general", "kind": "temporal"}
+{"id": "s09", "question": "What grows well in the south bed?", "lang": "en", "expected_paths": ["PROJECTS/Garden.md"], "scope": "general", "kind": "fact"}
+{"id": "s10", "question": "Какие принципы Цеттелькастена применяются в этом хранилище?", "lang": "ru", "expected_paths": ["Vault Conventions.md"], "scope": "general", "kind": "decision"}
+{"id": "s11", "question": "What is my chess rating?", "lang": "en", "expected_paths": [], "scope": "general", "kind": "adversarial"}
+{"id": "s12", "question": "Какой у меня рейтинг в шахматах?", "lang": "ru", "expected_paths": [], "scope": "general", "kind": "adversarial"}
+{"id": "s13", "question": "On which exchange does the platypus trade zanzibar coins?", "lang": "en", "expected_paths": [], "scope": "general", "kind": "adversarial"}
+{"id": "s14", "question": "Кто продаёт злендарские монеты платипусу?", "lang": "ru", "expected_paths": [], "scope": "general", "kind": "adversarial"}

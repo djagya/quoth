@@ -1,0 +1,99 @@
+# TEMPLATE: the Quoth WebUI memory views as one slim Compose service.
+#
+# Why Compose and not an s6 service: the control process must listen on
+# 127.0.0.1:17889 inside the WebUI's network namespace (the WebUI proxies the
+# extension to that loopback origin), and the Hermes container is on another
+# Docker network. It cannot run inside the WebUI container either: the venv's
+# interpreter is the Hermes image's python, so this service runs the pinned
+# Hermes image with the install mounted read-only. No image is built.
+#
+# Host variables (all required, fail closed; put them in the stack's .env):
+#   QUOTH_IMAGE          the pinned Hermes image, by digest (same as the hermes service)
+#   QUOTH_PREFIX         host directory holding quoth-X.Y.Z/ and quoth-current
+#                        (the --prefix of deploy/install-release.sh)
+#   QUOTH_HOME           host directory of quoth's state (socket, refresh/)
+#   QUOTH_PYTHON         interpreter dir name inside the venv, e.g. python3.13
+#   WEBUI_STATE_VOLUME   the WebUI's named state volume (holds sidecar-auth/)
+#   HERMES_IMAGE_VOLUME  the data VOLUME the Hermes image declares; masked here
+# Optional: HERMES_UID / HERMES_GID (default 1000), QUOTH_TOKEN_NAME (default
+# quoth: the token the WebUI mints for the extension id "quoth").
+#
+# Inside the container the install is /quoth/venvs and the state /quoth/state.
+# Use: docker compose -f compose.yaml -f deploy/compose/quoth-control.yaml up -d
+# After `install-release.sh` moves quoth-current, recreate both services
+# (`up -d --force-recreate hermes-webui quoth-control`): bind sources are
+# resolved when a container is created.
+services:
+  hermes-webui:
+    environment:
+      HERMES_WEBUI_EXTENSION_DIR: /quoth/extension
+      HERMES_WEBUI_EXTENSION_MANIFEST: extensions.json
+      HERMES_SKIP_CHMOD: "1"
+    volumes:
+      # extensions.json + quoth/{boot.js,control.css}, straight from the installed wheel.
+      - ${QUOTH_PREFIX:?}/quoth-current/lib/${QUOTH_PYTHON:?}/site-packages/quoth/_webui_extension:/quoth/extension:ro
+
+  quoth-control:
+    image: ${QUOTH_IMAGE:?pinned Hermes image digest}
+    container_name: quoth-control
+    # Shares ONLY the WebUI's network namespace (not its PID, filesystem or UID).
+    # Recreate this service whenever hermes-webui is recreated.
+    network_mode: service:hermes-webui
+    depends_on:
+      - hermes-webui
+    user: "${HERMES_UID:-1000}:${HERMES_GID:-1000}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      QUOTH_HOME: /quoth/state
+    entrypoint: ["/quoth/venvs/quoth-current/bin/python", "-m", "quoth.control"]
+    # Memory views only (no lab snapshot). The ledger and core come from the
+    # sidecar over its socket; this container never opens ledger.db.
+    command:
+      - --token-file
+      - /run/webui-sidecar-auth/${QUOTH_TOKEN_NAME:-quoth}.token
+      - --quoth-socket
+      - /quoth/state/quoth.sock
+      - --nightly-receipts
+      - /quoth/state/refresh/receipts
+      - --heartbeat
+      - /quoth/state/refresh/heartbeat.json
+    volumes:
+      - ${QUOTH_PREFIX:?}:/quoth/venvs:ro
+      # The whole state directory, read-only: the socket lives here and the
+      # sidecar recreates it on every restart (a file-level bind would go stale).
+      # Nothing in this process opens the ledger or lane DBs (socket mode).
+      - ${QUOTH_HOME:?}:/quoth/state:ro
+      # The subpath must exist before this container is created; the WebUI
+      # creates it on consent/mint. Never mount the whole WebUI state here.
+      - type: volume
+        source: ${WEBUI_STATE_VOLUME:?}
+        target: /run/webui-sidecar-auth
+        read_only: true
+        volume:
+          subpath: sidecar-auth
+    # /health: 200 once the token file is readable (memory-only mode).
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "4", "http://127.0.0.1:17889/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    tmpfs:
+      - /tmp:size=32m,uid=${HERMES_UID:-1000},gid=${HERMES_GID:-1000},mode=0700
+      # Mask the Hermes image's data VOLUME; only the read-only mounts above show through.
+      - ${HERMES_IMAGE_VOLUME:?}:size=1m,uid=${HERMES_UID:-1000},gid=${HERMES_GID:-1000},mode=0700
+    ulimits:
+      core: 0
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+    restart: unless-stopped

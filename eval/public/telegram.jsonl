@@ -1,0 +1,10 @@
+{"id": 1, "session": "tg-a", "source": "telegram", "role": "user", "ts": 1780000000.0, "text": "[Owner] Which day is the bin collection in our street?"}
+{"id": 2, "session": "tg-a", "source": "telegram", "role": "assistant", "ts": 1780000010.0, "text": "Bin collection in your street is on Thursday mornings; put the green bin out on Wednesday night."}
+{"id": 3, "session": "tg-a", "source": "telegram", "role": "user", "ts": 1780000100.0, "text": "[Owner] Remember that I switched my phone plan to Kestrel Mobile last week."}
+{"id": 4, "session": "tg-a", "source": "telegram", "role": "assistant", "ts": 1780000110.0, "text": "Noted: your phone plan is now with Kestrel Mobile."}
+{"id": 5, "session": "tg-b", "source": "telegram", "role": "user", "ts": 1781000000.0, "text": "[Owner] I've decided the garden gets drip irrigation this summer, no more hand watering."}
+{"id": 6, "session": "tg-b", "source": "telegram", "role": "assistant", "ts": 1781000010.0, "text": "For the bike commute I suggest the river path: it is flatter and about ten minutes faster than the main road."}
+{"id": 7, "session": "tg-c", "source": "telegram", "role": "assistant", "ts": 1782000000.0, "text": "For the Lantern battery check, test each returned cell at 3.7 volts before shipping a replacement pack."}
+{"id": 8, "session": "tg-c", "source": "telegram", "role": "user", "ts": 1782000100.0, "text": "[Owner] Мой любимый маршрут для пробежки — вдоль канала до старой мельницы."}
+{"id": 9, "session": "cron-1", "source": "cron", "role": "assistant", "ts": 1782000200.0, "text": "Nightly summary: nothing new about the bin collection or the garden."}
+{"id": 10, "session": "tg-c", "source": "telegram", "role": "assistant", "ts": 1782000300.0, "text": "Ok."}

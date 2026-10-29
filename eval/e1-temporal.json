@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "db": "SYNTHETIC-FIXTURE: regenerate against a real immutable snapshot db_sha256 before any use",
+  "note_date_rule": "filename YYYY-MM-DD equal to frontmatter created; mtime never used",
+  "event_date_rule": "explicit event_date window; no inference from retrieval scores",
+  "gates": {
+    "declared_before_candidate_results": true,
+    "G1_temporal_answer": "temporal_order answer_correct: candidate >= baseline + 0.25 absolute AND candidate >= 0.70",
+    "G2_seed": "seed item answer_correct AND provenance_correct (accept_chunks rebound to the regenerated set)",
+    "G3_abstention": "candidate abstention recall >= 0.80 AND precision >= 0.80; baseline reported",
+    "G4_ordinary_no_regression": "ordinary recall@5, recall@15 and MRR candidate >= baseline; zero operator triggers on E1 ordinary+authority items",
+    "G5_authority_provenance": "authority control_facets_pass candidate == baseline per item; every candidate answer_correct item is provenance_correct",
+    "G6_latency": "candidate p95 <= baseline p95 + 250 ms AND candidate max <= 3000 ms (warm, 2 threads)",
+    "G7_bounds": "assistant_hits == 0; candidate max_bundle_chars <= 40000",
+    "retain_rule": "retain candidate only if G1..G7 all pass; otherwise reject and keep dense default"
+  },
+  "items": [
+    {
+      "id": "t01",
+      "category": "temporal_order",
+      "lang": "ru",
+      "question": "О чём я в последний раз мечтал в заметках снов?",
+      "gold_path": "ME/dreams/2026-01-01.md",
+      "evidence_regex": null,
+      "op": "last",
+      "series": "ME/dreams/",
+      "lo": null,
+      "hi": null,
+      "event_date": {"kind": "exact", "lo": "2026-01-01", "hi": "2026-01-01", "note": "synthetic fixture"},
+      "accept_chunks": [],
+      "expect_abstain": false
+    },
+    {
+      "id": "t02",
+      "category": "temporal_order",
+      "lang": "en",
+      "question": "What is the first entry in the synthetic morning pages series?",
+      "gold_path": "ME/mornings pages/day1.md",
+      "evidence_regex": null,
+      "op": "first",
+      "series": "ME/mornings pages/",
+      "lo": null,
+      "hi": null,
+      "event_date": {"kind": "exact", "lo": "2026-01-02", "hi": "2026-01-02", "note": "synthetic fixture"},
+      "accept_chunks": [],
+      "expect_abstain": false
+    },
+    {
+      "id": "t03",
+      "category": "abstention",
+      "lang": "en",
+      "question": "When did the platypus first rent a zanzibar scooter?",
+      "gold_path": null,
+      "evidence_regex": null,
+      "op": null,
+      "series": null,
+      "lo": null,
+      "hi": null,
+      "event_date": null,
+      "accept_chunks": [],
+      "expect_abstain": true
+    },
+    {
+      "id": "t04",
+      "category": "abstention",
+      "lang": "ru",
+      "question": "Сколько стоил билет платипуса на злендарский паром?",
+      "gold_path": null,
+      "evidence_regex": null,
+      "op": null,
+      "series": null,
+      "lo": null,
+      "hi": null,
+      "event_date": null,
+      "accept_chunks": [],
+      "expect_abstain": true
+    }
+  ]
+}

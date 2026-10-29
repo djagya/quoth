@@ -1,0 +1,14 @@
+# TEMPLATE: the read-only Quoth MCP entry for Hermes. Replace both placeholders
+# (the install prefix and a separately verified immutable snapshot) and apply it
+# with `hermes config set`; do not hand-edit a live configuration.
+#   <QUOTH_PREFIX>  the --prefix given to deploy/install-release.sh
+#   <SNAPSHOT>      absolute path of an accepted serving snapshot
+mcp_servers:
+  quoth:
+    # Fixed path: symlink to the active immutable venv (deploy/install-release.sh).
+    command: <QUOTH_PREFIX>/quoth-current/bin/quoth
+    args:
+      - mcp
+      - --db
+      - <SNAPSHOT>
+    # `quoth mcp` is always read-only: only evidence_bundle is registered.

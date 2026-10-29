@@ -1,0 +1,134 @@
+name: Verify and gated package delivery
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish the verified package as a GitHub Release
+        type: boolean
+        default: false
+      release_tag:
+        description: Existing version tag pointing to the exact selected commit
+        type: string
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: quoth-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.12.3'
+          enable-cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Locked installation
+        run: uv sync --locked --python 3.13
+      - name: Portable tests and synthetic DOM
+        run: |
+          mkdir -p artifacts
+          uv run --locked python -m pytest -q --junitxml=artifacts/pytest.xml
+          node tests/playground-dom.cjs
+      - name: Build distributable packages and hash-locked requirements
+        run: |
+          uv build
+          shopt -s nullglob
+          wheels=(dist/quoth-*-py3-none-any.whl)
+          [ "${#wheels[@]}" -eq 1 ] || { echo "expected one wheel, found ${#wheels[@]}"; exit 1; }
+          version="${wheels[0]#dist/quoth-}"
+          version="${version%-py3-none-any.whl}"
+          uv export --locked --no-emit-project --extra dense --format requirements.txt \
+            --output-file "dist/quoth-${version}-requirements.txt"
+      - name: Install wheel with the shipped locked requirements in a separate environment
+        run: |
+          uv venv --python 3.13 "$RUNNER_TEMP/wheel-env"
+          uv pip sync --require-hashes --python "$RUNNER_TEMP/wheel-env/bin/python" dist/*-requirements.txt
+          uv pip install --no-deps --python "$RUNNER_TEMP/wheel-env/bin/python" dist/*.whl
+      - name: Exercise installed wheel, portable bundles, MCP and synthetic golden set
+        run: '"$RUNNER_TEMP/wheel-env/bin/python" scripts/ci_smoke.py --require-wheel --output artifacts/smoke.json'
+      - name: Bind packages to exact source and checksums
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          printf '%s\n' "$SOURCE_SHA" > artifacts/source-commit.txt
+          sha256sum dist/*.whl dist/*.tar.gz dist/*-requirements.txt > artifacts/SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verified-${{ github.sha }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/*-requirements.txt
+            artifacts/
+          if-no-files-found: error
+          retention-days: 14
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.12.3'
+          enable-cache: false
+      - name: Known vulnerabilities in the locked runtime dependencies (incl. dense extra)
+        run: |
+          uv export --locked --no-emit-project --extra dense --format requirements.txt \
+            --output-file "$RUNNER_TEMP/requirements.txt"
+          uvx --python 3.13 pip-audit==2.10.1 --disable-pip --strict --progress-spinner off \
+            -r "$RUNNER_TEMP/requirements.txt"
+      - name: Workflow static analysis
+        run: uvx zizmor==1.30.1 --min-severity medium --format plain .github/workflows
+      - name: Secret scan of the full history
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --exit-code 1 .
+  deliver:
+    needs: [verify, security]
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+    environment: release
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: verified-${{ github.sha }}
+          path: verified
+      - name: Fail-closed release guard (existing exact-commit tag, exact asset identity)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+        run: python3 scripts/release_guard.py --root verified

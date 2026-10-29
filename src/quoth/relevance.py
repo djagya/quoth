@@ -1,0 +1,316 @@
+"""Relevance gate for prefetch injection: what serving would inject must also clear a bar.
+
+Retrieval and candidate lists are unchanged. The gate only decides which of the items a
+turn would inject (the top ``k_evidence`` vault hits, the served claims) reach the recall
+block, so a turn with nothing relevant injects nothing. It reads signals already at hand
+when evidence returns, no extra model or index call:
+
+- ``cosine``: the dense similarity the store ranked by (bge-m3, normalised vectors);
+- ``gap``: how far a vault hit's cosine sits below the turn's top vault hit;
+- ``lexical``: the share of the query's content words found in the item's text, and
+  ``matched``, how many (a lexical rescue needs at least RESCUE_MIN_TERMS);
+- ``rerank`` (0.13.2, only with a reranker loaded, `quoth.rerank`): a cross-encoder's
+  sigmoid score of (query, item text). Where a turn has it for every hit it would rerank,
+  the rerank thresholds decide those hits instead of the cosine ones; where it is missing
+  (model loading or unavailable, over its time budget) the cosine gate applies.
+
+Every threshold is off by default: every item then passes with reason ``off`` and the
+recall block is exactly what it was without the gate. `quoth eval sweep` replays the same
+`Gate` on recorded signals, so a threshold chosen offline behaves the same on the sidecar.
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, fields
+import re
+import unicodedata
+
+_WORD = re.compile(r"\w+", re.UNICODE)
+# Words compare by a light stem: one inflection ending stripped, then the first STEM letters.
+STEM = 6
+# Cyrillic endings (longest first); a stem keeps at least 2 letters.
+_CYR_ENDINGS = ("ями", "ами", "ого", "его", "ому", "ему", "ыми", "ими", "ах", "ях", "ам", "ям", "ом",
+                "ем", "ой", "ей", "ий", "ый", "ая", "ое", "ую", "юю", "ов", "ев",
+                "а", "я", "у", "ю", "е", "и", "ы", "о", "й", "ь")
+_CYRILLIC = re.compile(r"[а-я]")
+# A lexical rescue needs this many matched words: one shared name is not relevance.
+RESCUE_MIN_TERMS = 2
+# Function words of the set's languages (en, ru, pt, de) and conversational filler (the
+# assistant's name, thanks, greetings); shorter words are dropped anyway.
+STOPWORDS = frozenset(w.replace("ё", "е") for w in """
+the and for are was were what when where which who whom whose why how that this these those
+with from have has had does did done about into onto your yours you our ours his her hers their
+theirs they them there then than but not can could would should will shall all any some its
+just also very too more most much many such only own same other again once here out off over
+under above below between after before during while because until been being
+что как где когда это этот эта эти тот там тут для или его она они оно был была было были есть
+мне меня мой моя моё мои так уже все всё ещё еще про при над под без чем кто нас вас вам нам
+тебя тебе себя свой своя свои какой какая какое какие сколько почему зачем если чтобы только
+очень тоже также надо нужно можно будет было
+que para com uma uns umas como onde quando qual quais por pelo pela pelos pelas sobre mas não
+isso isto este esta esse essa aquele aquela meu minha meus minhas você vocês ele ela eles elas
+foi ser são tem têm está estão seu sua seus suas dos das nos nas num numa
+und der die das ist ein eine einen einem einer mit für von wie was wer wann nicht auch auf aus
+bei ich mein meine sind war hat haben dem den des sich wir ihr sie zum zur noch nur oder aber
+thanks thank please hello hey спасибо пожалуйста привет obrigado obrigada olá danke bitte hallo
+""".split())
+
+
+def stem(word: str) -> str:
+    """Light folding of a casefolded word: Москве/Москва, чая/чай, cities/city, rents/rent."""
+    if _CYRILLIC.search(word):
+        for ending in _CYR_ENDINGS:
+            if word.endswith(ending) and len(word) - len(ending) >= 2:
+                word = word[:-len(ending)]
+                break
+    elif word.endswith("ies") and len(word) > 4:
+        word = word[:-3] + "y"
+    elif word.endswith("s") and not word.endswith("ss") and len(word) > 3:
+        word = word[:-1]
+    return word[:STEM]
+
+
+def terms(text: str) -> frozenset[str]:
+    """Content words of `text`: casefolded (ё as е), function words and 1-2 letter words
+    dropped, other words stemmed (`stem`); numbers kept whole (2+ digits)."""
+    out = set()
+    folded = unicodedata.normalize("NFC", str(text or "")).casefold().replace("ё", "е")
+    for word in _WORD.findall(folded):
+        if word in STOPWORDS:
+            continue
+        if word.isdigit():
+            if len(word) >= 2:
+                out.add(word)
+        elif len(word) >= 3:
+            out.add(stem(word))
+    return frozenset(out)
+
+
+def overlap(query_terms: frozenset[str], text: str) -> tuple[float | None, int]:
+    """(share of the query's content words present in `text`, None when the query has
+    none; how many are present)."""
+    if not query_terms:
+        return None, 0
+    found = len(query_terms & terms(text))
+    return round(found / len(query_terms), 4), found
+
+
+def coverage(query_terms: frozenset[str], text: str) -> float | None:
+    return overlap(query_terms, text)[0]
+
+
+@dataclass(frozen=True)
+class Gate:
+    """Thresholds per store; None leaves that check off.
+
+    Vault: a hit passes when its lexical coverage reaches ``vault_lexical_rescue`` with at
+    least RESCUE_MIN_TERMS words, else when its cosine is at least ``vault_min_cosine``
+    and at most ``vault_max_gap`` below the turn's top hit. A rescue without a floor or a
+    gap would gate nothing and is refused. Claims: a dense match passes at
+    ``claims_min_cosine``, a word-only match at ``claims_min_lexical`` coverage; either
+    path also passes on the other's bar. An item without a score is never dropped.
+    """
+
+    vault_min_cosine: float | None = None
+    vault_max_gap: float | None = None
+    vault_lexical_rescue: float | None = None
+    claims_min_cosine: float | None = None
+    claims_min_lexical: float | None = None
+    # Rerank thresholds (0.13.2). Left out of `to_dict` while None, so a gate without
+    # them reports exactly what 0.12.5 did (health, receipts).
+    vault_min_rerank: float | None = None
+    vault_max_rerank_gap: float | None = None
+    vault_rerank_widen: float | None = None
+    claims_min_rerank: float | None = None
+
+    def __post_init__(self):
+        if self.vault_lexical_rescue is not None and not self.vault_on:
+            raise ValueError("vault_lexical_rescue needs vault_min_cosine or vault_max_gap")
+        widen = self.vault_rerank_widen
+        if widen is not None and (widen != int(widen) or not 1 <= widen <= MAX_WIDEN):
+            raise ValueError(f"vault_rerank_widen must be a whole number of hits, 1..{MAX_WIDEN}")
+
+    @property
+    def vault_on(self) -> bool:
+        return self.vault_min_cosine is not None or self.vault_max_gap is not None
+
+    @property
+    def rerank_on(self) -> bool:
+        """The vault hits are judged (and with a widen, chosen) by rerank score when scored."""
+        return (self.vault_min_rerank is not None or self.vault_max_rerank_gap is not None
+                or self.vault_rerank_widen is not None)
+
+    @property
+    def rerank_any(self) -> bool:
+        """Any rerank threshold, vault or claims (they need a loaded reranker)."""
+        return self.rerank_on or self.claims_min_rerank is not None
+
+    def rerank_depth(self, k: int) -> int:
+        """How many vault hits (cosine order) a turn reranks: the served k, or the widen."""
+        return max(k, int(self.vault_rerank_widen or 0))
+
+    @property
+    def claims_on(self) -> bool:
+        return self.claims_min_cosine is not None or self.claims_min_lexical is not None
+
+    def vault(self, cosine: float | None, top: float | None, lexical: float | None,
+              matched: int = 0, rerank: float | None = None, rerank_top: float | None = None) -> tuple[bool, str]:
+        """(passes, reason) for one vault hit; `top` is the turn's best vault cosine,
+        `matched` how many query words the hit holds; `rerank` its rerank score when the
+        turn's hits are scored (None: the cosine rules apply), `rerank_top` the best one."""
+        if self.rerank_on and rerank is not None:
+            if self.vault_min_rerank is not None and rerank < self.vault_min_rerank:
+                return False, "rerank_floor"
+            gap = self.vault_max_rerank_gap
+            if gap is not None and rerank_top is not None and round(rerank_top - rerank, 4) > gap:
+                return False, "rerank_gap"
+            return True, "rerank"
+        if not self.vault_on:
+            return True, "off"
+        if cosine is None:
+            return True, "unscored"
+        rescue = self.vault_lexical_rescue
+        if rescue is not None and lexical is not None and lexical >= rescue and matched >= RESCUE_MIN_TERMS:
+            return True, "lexical"
+        if self.vault_min_cosine is not None and cosine < self.vault_min_cosine:
+            return False, "below_floor"
+        if self.vault_max_gap is not None and top is not None and round(top - cosine, 4) > self.vault_max_gap:
+            return False, "gap"
+        return True, "cosine"
+
+    def claim(self, cosine: float | None, lexical: float | None, rerank: float | None = None) -> tuple[bool, str]:
+        """(passes, reason) for one served claim; `cosine` is None for a word-only match,
+        `rerank` its rerank score when scored (then it alone decides, at `claims_min_rerank`)."""
+        if self.claims_min_rerank is not None and rerank is not None:
+            return (True, "rerank") if rerank >= self.claims_min_rerank else (False, "rerank_floor")
+        if not self.claims_on:
+            return True, "off"
+        words = self.claims_min_lexical is not None and lexical is not None and lexical >= self.claims_min_lexical
+        if cosine is not None:
+            if self.claims_min_cosine is None or cosine >= self.claims_min_cosine:
+                return True, "cosine"
+            return (True, "lexical") if words else (False, "below_floor")
+        if self.claims_min_lexical is None:
+            return True, "unscored"
+        return (True, "lexical") if words else (False, "weak_words")
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in asdict(self).items() if v is not None or k not in RERANK_FIELDS}
+
+    def status(self) -> dict:
+        """Thresholds plus whether each store is actually gated (`/v1/health`)."""
+        return {**self.to_dict(), "vault_on": self.vault_on, "claims_on": self.claims_on}
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "Gate":
+        data = data or {}
+        return cls(**{f.name: (None if data.get(f.name) is None else float(data[f.name]))
+                      for f in fields(cls)})
+
+    def flags(self) -> list[str]:
+        """The sidecar (and `eval run`) flags that set this gate."""
+        out = []
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if value is not None:
+                out += ["--" + f.name.replace("_", "-"), f"{value:g}"]
+        return out
+
+
+RERANK_FIELDS = ("vault_min_rerank", "vault_max_rerank_gap", "vault_rerank_widen", "claims_min_rerank")
+MAX_WIDEN = 20  # sidecar.MAX_CANDIDATES: the deepest vault list a turn can retrieve
+
+
+def add_arguments(parser) -> None:
+    """The gate's flags, shared by `quoth sidecar` and `quoth eval run`."""
+    parser.add_argument("--vault-min-cosine", type=float, default=None,
+                        help="relevance gate: inject a vault hit only at or above this cosine (default off)")
+    parser.add_argument("--vault-max-gap", type=float, default=None,
+                        help="relevance gate: drop vault hits more than this cosine below the turn's top hit")
+    parser.add_argument("--vault-lexical-rescue", type=float, default=None,
+                        help="relevance gate: a vault hit holding this share of the query's words (2 or more)"
+                             " passes the floor and gap anyway; needs one of them")
+    parser.add_argument("--claims-min-cosine", type=float, default=None,
+                        help="relevance gate: inject a meaning-matched claim only at or above this cosine")
+    parser.add_argument("--claims-min-lexical", type=float, default=None,
+                        help="relevance gate: inject a word-matched claim only at this share of the query's words")
+    parser.add_argument("--vault-min-rerank", type=float, default=None,
+                        help="relevance gate: inject a vault hit only at or above this rerank score (needs"
+                             " --rerank-model; replaces the cosine rules on turns whose hits are scored)")
+    parser.add_argument("--vault-max-rerank-gap", type=float, default=None,
+                        help="relevance gate: drop vault hits more than this rerank score below the turn's best")
+    parser.add_argument("--vault-rerank-widen", type=int, default=None,
+                        help="rerank the top N vault hits by cosine and serve the best 3 by rerank score"
+                             " (default off: rerank the 3 served hits, keep cosine order)")
+    parser.add_argument("--claims-min-rerank", type=float, default=None,
+                        help="relevance gate: inject a meaning-matched claim only at or above this rerank score")
+
+
+def from_args(args, parser=None) -> Gate:
+    """The gate the flags set; an incoherent combination is a usage error (`parser.error`)."""
+    try:
+        return Gate(**{f.name: getattr(args, f.name, None) for f in fields(Gate)})
+    except ValueError as exc:
+        if parser is None:
+            raise
+        parser.error(f"relevance gate: {exc}")
+
+
+def judge_vault(gate: Gate, query_terms: frozenset[str], hits: list[dict], k: int = 3,
+                rerank: list | None = None) -> list[dict]:
+    """Per hit (ranked list): {lexical, matched, passed, gate}; `cosine` is read from the hit.
+    `k` is how many hits serving injects. With `rerank` (scores aligned to `hits`, None
+    where unscored: a reranker is loaded) each entry also carries its `rerank` score."""
+    out = []
+    for h in hits:
+        lexical, matched = overlap(query_terms, h.get("text") or "")
+        out.append({"lexical": lexical, "matched": matched})
+    signals = [{"cosine": h.get("cosine"), "lexical": j["lexical"], "matched": j["matched"]}
+               for h, j in zip(hits, out)]
+    for j, (passed, reason) in zip(out, decide_vault(gate, signals, k, rerank)):
+        j.update(passed=passed, gate=reason)
+    if rerank is not None:
+        for i, j in enumerate(out):
+            j["rerank"] = rerank[i] if i < len(rerank) else None
+    return out
+
+
+def rerank_usable(gate: Gate, rerank: list | None, n: int, k: int) -> bool:
+    """Rerank rules apply on a turn only when every hit it would rerank has a score."""
+    if not gate.rerank_on or rerank is None:
+        return False
+    depth = min(gate.rerank_depth(k), n)
+    return depth > 0 and len(rerank) >= depth and all(r is not None for r in rerank[:depth])
+
+
+def decide_vault(gate: Gate, items: list[dict], k: int, rerank: list | None = None) -> list[tuple[bool, str]]:
+    """(passes, reason) per vault hit, in cosine order; `items` carry cosine, lexical and
+    matched. The sidecar and `eval sweep` both decide through here."""
+    cosines = [it["cosine"] for it in items if it["cosine"] is not None]
+    top = max(cosines) if cosines else None
+    scores = rerank if rerank_usable(gate, rerank, len(items), k) else None
+    rerank_top = max(scores[:min(gate.rerank_depth(k), len(items))]) if scores else None
+    return [gate.vault(it["cosine"], top, it.get("lexical"), it.get("matched") or 0,
+                       scores[i] if scores and i < len(scores) else None, rerank_top)
+            for i, it in enumerate(items)]
+
+
+def vault_order(gate: Gate, n: int, k: int, rerank: list | None = None) -> list[int]:
+    """Indices of the hits serving would inject before the gate, in block order: the top
+    `k` by cosine, or with a widen and scored hits, the best `k` of the top N by rerank."""
+    if gate.vault_rerank_widen is not None and rerank_usable(gate, rerank, n, k):
+        depth = min(gate.rerank_depth(k), n)
+        return sorted(range(depth), key=lambda i: (-rerank[i], i))[:k]
+    return list(range(min(k, n)))
+
+
+def judge_claim(gate: Gate, query_terms: frozenset[str], claim: dict, cosine: float | None,
+                rerank: float | None = None, scored: bool = False) -> dict:
+    """`cosine` is the claim's score in the serving dense list (None: a word-only match),
+    kept as `gate_score` so a replay judges the same input whatever the candidate depth.
+    `scored` (claims are reranked): the entry also carries `rerank` (None: not scored)."""
+    lexical = coverage(query_terms, claim.get("text") or "")
+    passed, reason = gate.claim(cosine, lexical, rerank)
+    out = {"lexical": lexical, "gate_score": cosine, "passed": passed, "gate": reason}
+    if scored:
+        out["rerank"] = rerank
+    return out
