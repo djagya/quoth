@@ -357,52 +357,12 @@ def test_prefetch_log_binds_records_to_snapshot_gate_and_retrieval(app, snap, tm
     app.prefetch_log = PrefetchLog(tmp_path / "plog")
     app.prefetch({"query": "tomatoes basil south bed", "session_id": "s1"})
     app.prefetch_log.flush()
-    (turn,) = [json.loads(x) for x in next((tmp_path / "plog").glob("*.jsonl")).read_text().splitlines()]
+    (turn,) = [r for r in map(json.loads, next((tmp_path / "plog").glob("*.jsonl")).read_text().splitlines())
+               if r["type"] == "prefetch"]
     assert turn["snapshot_id"] == sha(snap) and turn["retrieval"] == "hybrid"
     assert turn["gate"] == Gate().to_dict() and "live" in turn
     assert all({"via", "named"} <= set(i) for i in turn["stores"]["vault"])
     assert "tomatoes" not in json.dumps(turn)
-
-
-class _LateEvidence:
-    queries = object()
-    retrieval = "hybrid"
-
-    def __init__(self, delay):
-        self.delay = delay
-
-    def bundle(self, query, k, model, **_):
-        time.sleep(self.delay)
-        return {"hits": [{"locator": "a.md:1-2", "path": "a.md", "text": "late a", "cosine": 0.8},
-                         {"locator": "a.md:3-4", "path": "a.md", "text": "late a2", "cosine": 0.7},
-                         {"locator": "b.md:1-2", "path": "b.md", "text": "late b", "cosine": 0.6}],
-                "provenance": {"snapshot_id": "snap-1"}}
-
-
-def test_a_late_search_is_logged_when_it_finishes(tmp_path):
-    from quoth.evals.online import online
-    from quoth.prefetch_log import PrefetchLog
-    log = PrefetchLog(tmp_path / "plog")
-    app = sidecar.Quoth(ledger_path=tmp_path / "l.db", evidence=_LateEvidence(0.3), evidence_budget=0.05,
-                        gate=Gate(), prefetch_log=log)
-    try:
-        out = app.prefetch({"query": "where is the late note", "session_id": "s1"})
-        assert out["evidence_status"] == "slow"
-        app.wait_idle()
-        for _ in range(50):
-            log.flush()
-            recs = [json.loads(x) for f in (tmp_path / "plog").glob("*.jsonl") for x in f.read_text().splitlines()]
-            if any(r["type"] == "late" for r in recs):
-                break
-            threading.Event().wait(0.02)
-        late = next(r for r in recs if r["type"] == "late")
-        assert late["would_inject"] == ["a.md:1-2", "b.md:1-2", "a.md:3-4"]  # one per note first
-        assert late["completed_ms"] >= 250 and late["snapshot_id"] == "snap-1"
-        assert late["budget_ms"] == 50.0 and "late a" not in json.dumps(late)  # locators, never text
-        report = online(tmp_path / "plog")
-        assert report["late"]["records"] == 1 and report["late"]["within"]["2s"] == 1.0
-    finally:
-        app.close()
 
 
 def test_online_joins_explicit_results_to_the_last_prefetch(tmp_path):

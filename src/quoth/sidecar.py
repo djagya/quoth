@@ -210,6 +210,7 @@ class Quoth:
         self._evidence_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quoth-evidence")
         self._evidence_lock = threading.Lock()
         self._evidence_future = None
+        self._evidence_turn = None  # the running job's measurement context (prefetch log on)
         # The reranker scores on its own worker: the evidence worker is free as soon as the
         # vault hits are ready, so the next turn's evidence never waits behind scoring.
         self._rerank_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quoth-rerank")
@@ -343,7 +344,6 @@ class Quoth:
         if dry and evidence_budget is not None:
             # Eval runs measure retrieval, not the live time budget (capped).
             budget = max(0.0, min(evidence_budget, DRY_RUN_MAX_BUDGET))
-        lanes = self._submit_lanes(query, session_id, k_cand)
         rr = self.reranker
         # Vault hits a turn reranks (the served ones, or the gate's widen); dry runs may score deeper.
         depth = self.gate.rerank_depth(k_evidence) if rr is not None else k_evidence
@@ -351,15 +351,25 @@ class Quoth:
         rerank_on = rr is not None and (dry or self.gate.rerank_any)
         vault_pool = min(max(VAULT_POOL, k_evidence, depth), MAX_CANDIDATES)
         claim_pool = min(max(CLAIM_POOL, k_claims), MAX_CANDIDATES)
+        # Record-only late-tail measurement (live turns with the log on): the request id is
+        # assigned and its `start` line queued before anything is submitted.
+        turn = None if dry or self.prefetch_log is None else self._log_start(
+            started, query, session_id, budget, k_evidence, k_claims, vault_pool, claim_pool,
+            depth, rerank_on)
+        lanes = self._submit_lanes(query, session_id, k_cand)
         future, status = None, "disabled"
         if self.evidence is not None and k_evidence > 0:
-            future, status = self._submit_evidence(query, max(vault_pool, k_cand), max(claim_pool, k_cand))
+            future, status = self._submit_evidence(query, max(vault_pool, k_cand), max(claim_pool, k_cand),
+                                                   turn=turn)
         t0 = time.monotonic()
         with self.lock:
             lexical_all = ledger.recall(self.conn, query, k=max(claim_pool, k_cand))
         ms = {"claims_lexical": _ms(t0)}
         hits_all, dense_all, provenance = [], [], {}
-        evidence_deadline = time.monotonic() + budget
+        wait_started = time.monotonic()
+        evidence_deadline = wait_started + budget
+        if turn is not None and future is not None:
+            self._log_wait(turn, wait_started, budget)
         if future is not None:
             try:
                 done = future.result(timeout=budget)
@@ -368,14 +378,12 @@ class Quoth:
                 ms.update(done.get("ms", {}))
                 status = "ok"
             except FutureTimeout:
-                status = "slow"
-                if not dry and self.prefetch_log is not None:
-                    # Record only: when the late search finishes, what it would have injected.
-                    future.add_done_callback(lambda f: self._log_late(
-                        f, started, query, session_id, k_evidence, vault_pool))
+                status = "slow"  # it keeps running; its `done` line records how it ended
             except Exception:
                 status = "unavailable"
                 log.warning("prefetch evidence unavailable")
+            if turn is not None:
+                turn["wait_end_ms"] = _ms(started)
         with self.lock:
             dense_views = ledger.servable(self.conn, [cid for cid, _ in dense_all]) if dense_all else []
         scores = dict(dense_all)
@@ -465,10 +473,11 @@ class Quoth:
             out["detail"]["status"] = trace["status"]
             out["detail"]["timings_ms"] = trace["ms"]
         elif self.prefetch_log is not None:
-            self._log_prefetch(query, session_id, trace)
+            self._log_prefetch(query, session_id, trace, turn)
         return out
 
-    def _log_prefetch(self, query: str, session_id: str, trace: dict) -> None:
+    def _log_prefetch(self, query: str, session_id: str, trace: dict, turn: dict | None = None) -> None:
+        """The turn returned (main-return event): what it served, joined to its job by `req`."""
         try:
             from .prefetch_log import now_iso, query_digest, session_hash
             stores = {name: [{k: v for k, v in item.items() if not k.startswith("_")} for item in items]
@@ -481,33 +490,111 @@ class Quoth:
                       "stores": stores, "status": trace["status"], "ms": trace["ms"]}
             if "live" in trace:
                 record["live"] = trace["live"]
+            if turn is not None:
+                record.update(req=turn["req"], job=turn.get("job"), returned_ms=_ms(turn["t0"]),
+                              config_sha256=turn["config_sha256"])
+                if "busy_job" in turn:
+                    record["busy_job"] = turn["busy_job"]
+                if "wait_end_ms" in turn:
+                    record["wait_end_ms"] = turn["wait_end_ms"]
             self.prefetch_log.write(record)
+            if turn is not None:
+                self.prefetch_log.job_returned(turn.get("job"))
         except Exception:
             log.warning("prefetch log record skipped")
 
-    def _log_late(self, future, started: float, query: str, session_id: str, k: int, pool: int) -> None:
-        """A `slow` turn's evidence finished after the turn answered: log when, and the
-        locators the gate would have injected (no text, nothing changes for the turn)."""
+    def _log_start(self, started: float, query: str, session_id: str, budget: float, k_evidence: int,
+                   k_claims: int, vault_pool: int, claim_pool: int, depth: int, rerank_on: bool) -> dict | None:
+        """Request-started event of a live turn: its id, code and config identity, before any
+        submission. Returns the turn's measurement context (None when it cannot be logged)."""
         try:
-            if future.cancelled() or future.exception() is not None:
-                return
-            from .prefetch_log import now_iso, query_digest, session_hash
-            done = future.result()
-            hits = done["hits"]
-            judged = relevance.judge_vault(self.gate, relevance.terms(query), hits, k)
-            chosen = relevance.vault_pick(self.gate, [g["passed"] for g in judged], pool, k,
-                                          notes=[h.get("path") for h in hits],
-                                          per_note=D.MAX_HITS_PER_NOTE["prefetch"])
-            self.prefetch_log.write({
-                "type": "late", "ts": now_iso(), "v": __version__, "session": session_hash(session_id),
-                "query_sha256": query_digest(query),
-                "snapshot_id": (done.get("provenance") or {}).get("snapshot_id"),
-                "retrieval": self.retrieval, "completed_ms": _ms(started),
-                "budget_ms": round(self.evidence_budget * 1000, 1),
-                "would_inject": [hits[i]["locator"] for i in chosen],
-                "pool": [h["locator"] for h in hits[:pool]]})
+            from .prefetch_log import code_digest, config_digest, new_id, now_iso, query_digest, session_hash
+            rr = self.reranker
+            gate = self.gate
+            config = {"gate": gate.to_dict(), "retrieval": self.retrieval, "model": self.model,
+                      "k_evidence": k_evidence, "k_claims": k_claims, "vault_pool": vault_pool,
+                      "claim_pool": claim_pool, "evidence_budget_ms": round(budget * 1000, 1),
+                      "per_note": D.MAX_HITS_PER_NOTE["prefetch"],
+                      "rerank": None if rr is None else {
+                          "on": rerank_on, "vault_rules": gate.rerank_on, "depth": depth,
+                          "budget_ms": round(rr.budget * 1000, 1), "claims": bool(rr.claims),
+                          "model": os.path.basename(str(getattr(rr, "name", "") or ""))},
+                      "lanes": {lane.name: bool(lane.prefetch) for lane in self._lanes()}}
+            turn = {"req": new_id(), "t0": started, "query_terms": relevance.terms(query), "gate": gate,
+                    "k": k_evidence, "pool": vault_pool, "config_sha256": config_digest(config),
+                    # The full decision of this turn would rerank its vault hits: a late job's
+                    # would-inject is then `unknown` (no extra rerank is ever run for the log).
+                    "needs_rerank": bool(rerank_on and gate.rerank_on)}
+            self.prefetch_log.write({"type": "start", "ts": now_iso(), "req": turn["req"], "v": __version__,
+                                     "code_sha256": code_digest(), "session": session_hash(session_id),
+                                     "query_sha256": query_digest(query), "query_len": len(query),
+                                     "config": config, "config_sha256": turn["config_sha256"]})
+            return turn
         except Exception:
-            log.warning("late prefetch record skipped")
+            log.warning("prefetch log record skipped")
+            return None
+
+    def _log_wait(self, turn: dict, wait_started: float, budget: float) -> None:
+        """Budget-wait-started event: when the turn began waiting and its effective deadline."""
+        try:
+            from datetime import datetime, timedelta, timezone
+            from .prefetch_log import now_iso
+            deadline = datetime.now(tz=timezone.utc) + timedelta(seconds=budget)
+            wait_ms = round((wait_started - turn["t0"]) * 1000, 2)
+            self.prefetch_log.write({"type": "wait", "ts": now_iso(), "req": turn["req"], "job": turn.get("job"),
+                                     "wait_ms": wait_ms, "budget_ms": round(budget * 1000, 1),
+                                     "deadline_ms": round(wait_ms + budget * 1000, 2),
+                                     "deadline_ts": deadline.isoformat(timespec="milliseconds")})
+        except Exception:
+            log.warning("prefetch log record skipped")
+
+    def _job_done(self, turn: dict, future) -> None:
+        """Done callback of a logged turn's evidence job (any thread, any order against the
+        turn's return): one `done` line per job, built on the log's writer thread."""
+        try:
+            plog = self.prefetch_log
+            if plog is None:
+                return
+            completed_ms = _ms(turn["t0"])
+            from .prefetch_log import now_iso
+            ts = now_iso()
+            if future.cancelled():
+                if plog.job_completed(turn["job"], censored=True):
+                    plog.write(_censored_record(turn, ts, completed_ms, "cancelled"))
+                return
+            exc = future.exception()
+            if not plog.job_completed(turn["job"]):
+                return  # already censored at close
+            if exc is not None:
+                plog.write({"type": "done", "ts": ts, "req": turn["req"], "job": turn["job"],
+                            "outcome": "exception", "exc_type": type(exc).__name__,
+                            "completed_ms": completed_ms})
+                return
+            done = future.result()
+            # A copy of what the gate reads, so the turn's own use of the hits never races it.
+            hits = [{"locator": h.get("locator"), "path": h.get("path"), "text": relevance.vault_text(h),
+                     "cosine": h.get("cosine"), "named": bool(h.get("named"))} for h in done.get("hits") or []]
+            snapshot_id = (done.get("provenance") or {}).get("snapshot_id")  # the lease it searched
+            claims_n = len(done.get("claims") or [])
+            plog.write(lambda: _completion_record(turn, ts, completed_ms, hits, snapshot_id, claims_n))
+        except Exception:
+            log.warning("prefetch log record skipped")
+
+    def _censor_jobs(self) -> None:
+        """At close: a logged job still running gets a `censored` done line (never dropped)."""
+        plog = self.prefetch_log
+        if plog is None:
+            return
+        try:
+            from .prefetch_log import now_iso
+            for job, req in plog.in_flight():
+                if plog.job_completed(job, censored=True):
+                    running = self._evidence_turn
+                    turn = running if running is not None and running.get("job") == job else {"req": req, "job": job}
+                    plog.write(_censored_record(turn, now_iso(),
+                                                _ms(turn["t0"]) if "t0" in turn else None, "shutdown"))
+        except Exception:
+            log.warning("prefetch log record skipped")
 
     def _log_skip(self, session_id: str) -> None:
         try:
@@ -751,16 +838,39 @@ class Quoth:
         return {"claims": score_pairs(model, query, [text for _, text in claims], until, cancel),
                 "deep": score_pairs(model, query, texts[live:], until, cancel)}
 
-    def _submit_evidence(self, query: str, k: int, k_claims: int = PREFETCH_CLAIMS):
+    def _submit_evidence(self, query: str, k: int, k_claims: int = PREFETCH_CLAIMS, turn: dict | None = None):
+        """Start the turn's evidence job, or `busy` while the previous one still runs (no job
+        is started). With a logged `turn`, the job gets its id before it is submitted and a
+        done callback that writes its one completion line."""
         with self._evidence_lock:
             if self._evidence_future is not None and not self._evidence_future.done():
+                if turn is not None:
+                    running = self._evidence_turn
+                    turn["busy_job"] = running.get("job") if running is not None else None
+                    self._log_event(turn, "busy", busy_job=turn["busy_job"])
                 return None, "busy"
             # A new turn's search comes first: a rerank job still running stops before its
             # next pair, so at most one pair overlaps bge-m3.
             if self._rerank_cancel is not None:
                 self._rerank_cancel.set()
-            self._evidence_future = self._evidence_pool.submit(self._dense_work, query, k, k_claims)
-            return self._evidence_future, "pending"
+            if turn is not None:
+                from .prefetch_log import new_id
+                turn["job"] = new_id()
+                self.prefetch_log.job_started(turn["job"], turn["req"])
+            self._evidence_turn = turn
+            self._evidence_future = future = self._evidence_pool.submit(self._dense_work, query, k, k_claims)
+        if turn is not None:
+            self._log_event(turn, "submitted", submitted_ms=_ms(turn["t0"]))
+            future.add_done_callback(lambda f: self._job_done(turn, f))
+        return future, "pending"
+
+    def _log_event(self, turn: dict, kind: str, **fields) -> None:
+        try:
+            from .prefetch_log import now_iso
+            self.prefetch_log.write({"type": kind, "ts": now_iso(), "req": turn["req"], "job": turn.get("job"),
+                                     **fields})
+        except Exception:
+            log.warning("prefetch log record skipped")
 
     def wait_idle(self, timeout: float = 30.0) -> None:
         """Block until background evidence/lane searches finish (eval harness, between rows)."""
@@ -995,6 +1105,7 @@ class Quoth:
 
     def close(self) -> None:
         if self.prefetch_log is not None:
+            self._censor_jobs()  # unresolved jobs end as `censored`, then the counters at close
             self.prefetch_log.close()
         self._close_episodes()
         self._evidence_pool.shutdown(wait=False, cancel_futures=True)
@@ -1159,6 +1270,37 @@ class Lane:
         self._pool.shutdown(wait=False, cancel_futures=True)
         self.episodes.close()
 
+
+
+def _completion_record(turn: dict, ts: str, completed_ms: float, hits: list, snapshot_id,
+                       claims_n: int) -> dict:
+    """A normal `done` line: the job's candidates and the counterfactual post-gate decision,
+    with the turn's own gate, k and pool (the same `judge_vault` + `vault_pick` the turn
+    uses). When the turn's full decision needs rerank scores, which a late job never has,
+    the decision is `unknown`: no rerank is run here, and a cosine-only pick is not offered
+    in its place. Runs on the log's writer thread; writes locators and counts, never text."""
+    pool = turn["pool"]
+    record = {"type": "done", "ts": ts, "req": turn["req"], "job": turn["job"], "outcome": "normal",
+              "completed_ms": completed_ms, "snapshot_id": snapshot_id, "raw_n": len(hits),
+              "candidates": [h["locator"] for h in hits[:pool]], "claims_dense_n": claims_n}
+    if turn["needs_rerank"]:
+        record.update(decision="unknown", unknown_reason="rerank_not_computed",
+                      would_inject=None, would_inject_n=None)
+        return record
+    gate, k = turn["gate"], turn["k"]
+    judged = relevance.judge_vault(gate, turn["query_terms"], hits, k)
+    chosen = relevance.vault_pick(gate, [g["passed"] for g in judged], pool, k,
+                                  notes=[h.get("path") for h in hits],
+                                  per_note=D.MAX_HITS_PER_NOTE["prefetch"])
+    record.update(decision="computed", would_inject=[hits[i]["locator"] for i in chosen],
+                  would_inject_n=len(chosen), passed_n=sum(bool(g["passed"]) for g in judged[:pool]))
+    return record
+
+
+def _censored_record(turn: dict, ts: str, running_ms, reason: str) -> dict:
+    """A job unresolved when the sidecar closed (or cancelled by its shutdown)."""
+    return {"type": "done", "ts": ts, "req": turn["req"], "job": turn["job"], "outcome": "censored",
+            "censored_reason": reason, "running_ms": running_ms}
 
 
 def _ms(since: float) -> float:
