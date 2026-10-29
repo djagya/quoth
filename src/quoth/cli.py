@@ -42,7 +42,8 @@ DELEGATED = {
     "eval": ("evals.cli", "eval sets: run, validate, convert, compare, sweep"),
     "hermes-plugin": ("hermes_install", "install or locate the Hermes memory-provider plugin"),
     "health": ("health", "check the install: venv, heartbeat, sidecar, review queue, episode lanes"),
-    "rerank": ("rerank", "the prefetch gate's cross-encoder: fetch it, check it loads, time it"),
+    "rerank": ("rerank", "the prefetch gate's cross-encoder: check it loads, time it"),
+    "models": ("models", "download and verify the local ONNX model files (embedder, reranker)"),
 }
 
 
@@ -100,7 +101,7 @@ def _cmd_embed(a) -> int:
     from .embed.store import embed_chunks
 
     try:
-        embedder = get_embedder(a.model, threads=a.threads, allow_download=False)
+        embedder = get_embedder(a.model, threads=a.threads)
         stats = embed_chunks(open_db(_evidence_db(a.db)), embedder,
                              batch_size=a.batch_size, limit=a.limit)
     except (OSError, sqlite3.Error, ValueError, RuntimeError) as e:

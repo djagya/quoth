@@ -555,18 +555,19 @@ def test_pinned_checksums_are_verified(tmp_path):
 def test_a_tampered_model_is_refused_after_download_and_on_load(tmp_path, monkeypatch):
     pytest.importorskip("onnxruntime")
     pytest.importorskip("tokenizers")
-    hub = pytest.importorskip("huggingface_hub")
+    from quoth import models
     spec = rerank.MODELS[rerank.DEFAULT_MODEL]
 
-    def fake_download(repo_id, revision, local_dir, allow_patterns):
-        assert revision == rerank.REVISION
-        for f in allow_patterns:
-            path = tmp_path / spec.repo / f
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"not the pinned file")
-    monkeypatch.setattr(hub, "snapshot_download", fake_download)
-    with pytest.raises(rerank.RerankerUnavailable, match="checksum mismatch"):
-        rerank.download(spec, str(tmp_path))
+    def fake_download(url, part):
+        assert f"/resolve/{rerank.REVISION}/" in url
+        part.write_bytes(b"not the pinned file")
+    monkeypatch.setattr(models, "_download", fake_download)
+    with pytest.raises(models.ModelError, match="does not match the pin"):
+        models.fetch(models.reranker_pin(spec.name), tmp_path)
+    for f in spec.files:  # a copy that skipped the fetch check is still refused on load
+        path = tmp_path / spec.repo / f
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not the pinned file")
     with pytest.raises(rerank.RerankerUnavailable, match="checksum mismatch"):
         rerank.get_reranker(rerank.DEFAULT_MODEL, cache_dir=str(tmp_path))
     assert RerankService(rerank.DEFAULT_MODEL, cache_dir=str(tmp_path)).wait() == "unavailable"

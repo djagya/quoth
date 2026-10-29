@@ -17,7 +17,7 @@ from .api import file_digest
 def check(db: Path, questions: Path, cache: Path) -> dict:
     before = file_digest(db)
     queries = [json.loads(line)["question"] for line in questions.read_text().splitlines() if line.strip()]
-    embedder = get_embedder("bge-m3", cache_dir=str(cache), threads=2, allow_download=False)
+    embedder = get_embedder("bge-m3", cache_dir=str(cache), threads=2)
     spec = production(db.stem, before)
     mismatches = 0
     with connect_read_only(db) as conn:

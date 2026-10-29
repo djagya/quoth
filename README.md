@@ -76,14 +76,14 @@ uv run quoth eval run eval/public/set.jsonl \
 
 Dense retrieval needs the `dense` extra and the BGE-M3 ONNX files pinned in
 `eval/models-manifest.json`, under `$QUOTH_MODEL_CACHE/BAAI/bge-m3/`. quoth never downloads
-them itself; fetch them once (about 2.3 GB), for example with the Hugging Face CLI:
+a model while it runs; fetch the files once (about 2.3 GB, every file checked against its
+pinned SHA-256):
 
 ```bash
 uv sync --extra dense
-uv run hf download BAAI/bge-m3 --revision 5617a9f61b028005a4858fdac845db406aefb181 \
-  --local-dir "${QUOTH_MODEL_CACHE:-$HOME/.local/share/quoth/models}/BAAI/bge-m3" \
-  config.json sentencepiece.bpe.model tokenizer.json tokenizer_config.json \
-  onnx/model.onnx onnx/model.onnx_data
+uv run quoth models fetch                                   # the BGE-M3 embedder
+uv run quoth models fetch --reranker bge-reranker-v2-m3-int8  # optional: the prefetch reranker
+uv run quoth models verify                                  # check what is in the cache
 ```
 
 ```bash

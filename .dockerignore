@@ -1,0 +1,10 @@
+.git
+.github
+.venv
+.scratch
+.claude
+.worktrees
+dist
+**/__pycache__
+**/*.db
+docs/assets

@@ -182,7 +182,7 @@ def _evaluate_pair(current: Path, candidate: Path, gate_set, private_runner: Pat
     adapter.validate(rows['private'])
     if gold_missing(rows['synthetic']):
         raise ValueError('synthetic_gold_missing')
-    embedder = get_embedder('bge-m3', threads=2, allow_download=False)
+    embedder = get_embedder('bge-m3', threads=2)
     outputs = []
     for db in (current, candidate):
         before = snapshot_hashes[db]
@@ -213,7 +213,7 @@ def _evaluate_pair(current: Path, candidate: Path, gate_set, private_runner: Pat
         'gold_drift': drift,
         'gate_set': gate_set_evidence(gate_set),
         'engine': 'quoth.evals',
-        'model': 'bge-m3', 'threads': 2, 'allow_download': False}
+        'model': 'bge-m3', 'threads': 2}
 
 
 async def stdio_probe(pointer: Path, expected_id: str, model='bge-m3'):

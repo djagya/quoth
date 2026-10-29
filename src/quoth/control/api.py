@@ -187,7 +187,7 @@ class ControlApp:
                 if self.embedder is None:
                     try:
                         self.embedder = get_embedder("bge-m3", cache_dir=self.model_cache,
-                                                     threads=2, allow_download=False)
+                                                     threads=2)
                     except EmbedderUnavailable:
                         raise APIError(503, "model_unavailable") from None
 

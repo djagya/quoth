@@ -61,7 +61,7 @@ def evaluate(db: Path, gate_set, private_runner: Path, *, quality_set=None):
     adapter.validate(rows['private'])
     if gold_missing(rows['synthetic']):
         raise ValueError('quality_gold_missing')
-    embedder = get_embedder('bge-m3', threads=2, allow_download=False)
+    embedder = get_embedder('bge-m3', threads=2)
     result, latency, timings = {}, [], {}
     try:
         with SnapshotScorer(db, embedder=embedder) as scorer:
