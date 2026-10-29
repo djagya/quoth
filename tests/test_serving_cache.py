@@ -8,7 +8,6 @@ import threading
 import pytest
 
 from quoth import serving_cache
-from quoth.dated import build_evidence
 from quoth.db import connect_read_only, open_db
 from quoth.embed.backends import EmbedderUnavailable, get_embedder
 from quoth.embed.store import embed_chunks
@@ -44,16 +43,14 @@ def _tool(server):
 
 
 def _expected(path, query, k, identity):
-    """The pre-cache tool output: default build_evidence path on a fresh connection."""
-    conn = connect_read_only(path)
+    """The tool output computed cold: a fresh connection and fresh caches every call."""
+    from quoth.evidence_service import ReadOnlyEvidence
+    snapshot = ServingSnapshot(path)
     try:
-        bundle = build_evidence(conn, query, k=k, model="hash-ngram",
-                                embedder=get_embedder("hash-ngram"))
+        bundle = ReadOnlyEvidence(snapshot).bundle(query, k, "hash-ngram")
     finally:
-        conn.close()
-    bundle["provenance"] = {"snapshot_id": identity}
-    for hit in bundle["hits"]:
-        hit["provenance"] = {"snapshot_id": identity}
+        snapshot.close()
+    assert bundle["provenance"]["snapshot_id"] == identity
     return json.dumps(bundle, ensure_ascii=False)
 
 
@@ -200,9 +197,9 @@ def test_warmup_preloads_matrix_and_embedder(db, monkeypatch):
     st = _state_for(db)
     assert "hash-ngram" in st.vectors_ok and st._matrices and st._dates is not None
     fn = _tool(server)
-    assert fn(query="tomatoes basil", k=5, model="hash-ngram") == _expected(
-        db, "tomatoes basil", 5, sha(db))
+    out = fn(query="tomatoes basil", k=5, model="hash-ngram")
     assert loads == ["hash-ngram"]
+    assert out == _expected(db, "tomatoes basil", 5, sha(db))
 
 
 def test_warmup_failure_keeps_fail_closed(db, monkeypatch):

@@ -96,7 +96,29 @@ the candidate depth. Vault and claim candidates also carry the relevance gate's 
 (in the live pool a turn judges), `lexical` (share of the query's content words in the
 injected text; vault hits also `matched`, the count; claims also `gate_score`), `passed` and
 `gate` (the reason). With a reranker loaded, they also carry `rerank` and `rerank_ms`.
-`score` per store is described in [HERMES.md](HERMES.md#recall-v1prefetch).
+`score` per store is described in [HERMES.md](HERMES.md#recall-v1prefetch). Vault candidates
+also carry `via` (the retrieval lists that found the hit: `dense`, `bm25`, `trigram`, `named`)
+and `named` (the query names the hit's note: the gate's `name` rule).
+
+With a vault store, each row also makes the explicit `evidence_bundle` call the assistant's
+tool makes (`k` 10, the row's search text), so the receipt scores both paths on one run: the
+prefetch candidates (`metrics`) and the explicit bundle (`explicit`).
+
+### Retrieval modes
+
+`--retrieval hybrid` (default, as the sidecar serves) or `--retrieval dense` (cosine only,
+the 0.16 ranking) sets how vault hits are ranked, for prefetch and the explicit bundle alike
+([HERMES.md](HERMES.md#vault-retrieval)). Compare the two on one set:
+
+```bash
+quoth eval run SET --db SNAPSHOT --ledger LEDGER --retrieval dense --out dense.json --quiet
+quoth eval run SET --db SNAPSHOT --ledger LEDGER --out hybrid.json --quiet
+quoth eval compare dense.json hybrid.json
+```
+
+The receipt records `config.retrieval`. `--vault DIR` (the live vault root) adds per-hit
+freshness (`live`) to the explicit hits, as the sidecar's `--vault` does; its cost shows as
+`latency_ms.explicit_live`. The nightly gate scores with the serving default.
 
 Targets:
 
@@ -104,13 +126,13 @@ Targets:
   --owner-episodes --model`, or from `--fixture-dir` (a directory built by `eval fixture`),
   with the sidecar's own flags (`--evidence-budget`, `--episodes-prefetch`,
   `--owner-prefetch`, `--assistant-min-score`, `--owner-min-score`, the relevance gate and the
-  reranker flags). The gate starts at the serving defaults (`--vault-min-cosine 0.53
+  reranker flags, `--retrieval`, `--vault`). The gate starts at the serving defaults (`--vault-min-cosine 0.53
   --vault-max-gap 0.15`), exactly as the sidecar serves; pass `--vault-min-cosine off
   --vault-max-gap off` to score without a gate. It embeds all accepted claims first and waits
   for background searches between rows. A missing reranker model stops the run (exit 2).
 - **`--socket PATH`**: a live sidecar. Read-only, shares the loaded model, and runs with the
-  sidecar's own gate (recorded from `/v1/health`); gate flags other than the defaults and
-  rerank flags are refused here.
+  sidecar's own gate and retrieval (recorded from `/v1/health`); gate flags other than the
+  defaults, rerank, `--retrieval` and `--vault` flags are refused here.
   The evidence budget defaults to 30 seconds.
 
 `--gold-drift` (needs `--db`) resolves expected vault paths against the snapshot with the
@@ -136,7 +158,10 @@ All aggregate: overall and by `kind`, `origin` and `lang`, per store (`claims`, 
 | `empty_rate` | rows with nothing injected |
 | `abstain_nonempty_rate` | abstain rows that still got an injection (lower is better) |
 | `stale_leak` / `stale_leak_items` | rows / items where a stale source was injected (must stay 0) |
-| `latency_ms.STAGE.{p50,p95,max}` | `wall` (harness), `total`, `claims_lexical`, `vault`, `claims_dense`, `owner`, `assistant`; nearest-rank percentiles |
+| `latency_ms.STAGE.{p50,p95,max}` | `wall` (harness), `total`, `claims_lexical`, `vault`, `claims_dense`, `owner`, `assistant`, `live` (freshness of the injected hits), `explicit` (the explicit bundle), `explicit_live`; nearest-rank percentiles |
+| `explicit.hit@k` (k 1, 3, 5, 10), `explicit.recall@10` | the explicit `evidence_bundle` (k 10) over rows with vault gold: an expected path in its top k; mean share of expected paths in the top 10 |
+| `explicit.repeat_rate` | share of explicit hits whose note already appeared earlier in the same bundle |
+| `explicit.changed_hits` | explicit hits marked `changed` since indexing (with `--vault`) |
 
 `stores.vault.hit@5`, `hit@10`, `mrr` and `recall@10` are the nightly gate's metrics: the
 gate scores with the same candidates and matching.
@@ -148,16 +173,18 @@ gate scores with the same candidates and matching.
 ```json
 {"schema": "quoth-eval-run/v1", "created_at": "…", "code": {"package": "quoth", "version": "…"},
  "set": {"schema", "sha256", "rows", "privacy", "fixture"},
- "config": {"mode", "model", "evidence_budget", "stores", "prefetch", "min_score", "gate", "k_candidates",
+ "config": {"mode", "model", "evidence_budget", "retrieval", "stores", "prefetch", "min_score", "gate", "k_candidates",
             "gold_drift", "rerank": {"model", "repo", "revision", "budget", "claims", "max_tokens"}},
  "status": "ok|gold_drift_excessive", "gold_drift": {"renamed", "stale", "ids"}, "scored": 29,
- "metrics": {"overall", "by_kind", "by_origin", "by_lang"}, "latency_ms": {}, "statuses": {},
+ "metrics": {"overall", "by_kind", "by_origin", "by_lang"}, "explicit": {"calls", "rows", "hit@1", "hit@3",
+             "hit@5", "hit@10", "recall@10", "repeat_rate", "changed_hits"},
+ "latency_ms": {}, "statuses": {},
  "items": {"vault_hit@10": {"<id>": true}, "injected_hit": {"<id>": false}},
  "candidates": {"schema": "quoth-eval-candidates/v1", "rows": {"<id>": {
    "abstain": false, "answerable": true, "has_stale": false,
    "stores": {"vault": {"expected": 1, "items": [
      {"score": 0.61, "lexical": 0.5, "matched": 2, "match": [0], "pool": true, "injected": true,
-      "rerank": 0.93}]}}}}}}
+      "note": 0, "named": true, "rerank": 0.93}]}}}}}}
 ```
 
 Row ids are the per-row key. `candidates` keeps, per row and store, each candidate's score,
@@ -166,7 +193,31 @@ source), whether it is in the live pool and whether it was injected: the input o
 sweep`. The harness refuses
 to return a receipt that contains any question, expected path, hint or context text of the
 set. `--detail-out FILE` writes per-row candidate ids, locators and scores (no text) with mode
-0600; locators include note paths, so keep it private.
+0600; locators include note paths, so keep it private. A vault candidate's `note` is its note
+as an index within the row (so `eval sweep` replays the one-hit-per-note rule without paths),
+and `named` replays the gate's name rule.
+
+### Trace export: `--trace-out`
+
+`--trace-out FILE` writes one JSON line per row for caller tests (an assistant answering from
+exactly what quoth gave it, without access to live state). It prints the same kind of privacy
+warning as `--detail-out` and is written with mode 0600: it holds every question, recall block
+and excerpt, so it stays on the host, never in Git.
+
+```json
+{"id": "q-017", "snapshot_id": "<sha256>", "quoth_version": "0.17.0",
+ "settings": {"gate": {"vault_min_cosine": 0.53, "vault_max_gap": 0.15}, "retrieval": "hybrid",
+              "evidence_budget": 1.5, "k_candidates": 10, "k_evidence": 3, "k_explicit": 10,
+              "max_hits_per_note": {"prefetch": 1, "explicit": 2}},
+ "query": "<text>", "lang": "ru",
+ "prefetch_block": "<the exact <quoth-recall> text a live turn would inject>",
+ "explicit": [{"locator": "PROJECTS/x.md:10-24", "note_date": "2026-03-02", "project": "PROJECTS",
+               "live": "same", "text": "<excerpt>"}],
+ "labels": {"answerable": true, "kind": "temporal"}}
+```
+
+`explicit` is the row's explicit `evidence_bundle` (`live` is null without `--vault`).
+An oracle (hand-labelled decisive sources) is added by the caller, outside quoth.
 
 ### Compare and exit codes
 
@@ -364,16 +415,36 @@ JSON line per real (non-dry-run) prefetch to `DIR/prefetch-YYYY-MM-DD.jsonl` (UT
 directory 0700):
 
 ```json
-{"type": "prefetch", "ts": "…", "v": "0.16.0", "session": "<sha256(session_id)[:16]>",
- "query_sha256": "…", "query_len": 42,
+{"type": "prefetch", "ts": "…", "v": "0.17.0", "session": "<sha256(session_id)[:16]>",
+ "query_sha256": "…", "query_len": 42, "snapshot_id": "<sha256>", "retrieval": "hybrid",
+ "gate": {"vault_min_cosine": 0.53, "vault_max_gap": 0.15, "…": null},
  "stores": {"claims": [{"id": 12, "score": 0.71, "via": "dense", "pool": true, "gate_score": 0.71,
                         "lexical": 0.5, "passed": true, "gate": "off", "injected": true}],
-            "vault": [{"locator": "PROJECTS/x.md:3-9", "score": 0.58, "pool": true, "lexical": 0.5,
-                       "matched": 2, "passed": true, "gate": "cosine", "injected": true}],
+            "vault": [{"locator": "PROJECTS/x.md:3-9", "score": 0.58, "via": "dense+bm25", "named": false,
+                       "pool": true, "lexical": 0.5, "matched": 2, "passed": true, "gate": "cosine",
+                       "injected": true}],
             "owner": [{"locator": "hermes:S:M", "score": 0.66, "injected": true}]},
  "status": {"vault": "ok", "owner": "ok", "assistant": "off"},
- "ms": {"claims_lexical": 0.4, "vault": 41.0, "claims_dense": 0.2, "owner": 12.1, "total": 55.3}}
+ "live": {"stats": 3, "hashes": 0, "unchecked": 0},
+ "ms": {"claims_lexical": 0.4, "vault": 41.0, "claims_dense": 0.2, "live": 0.1, "owner": 12.1, "total": 55.3}}
 ```
+
+`snapshot_id`, `retrieval` and `gate` bind a turn to the snapshot and the settings it was
+served with, so it can be replayed. `live` is the freshness check of the injected hits (with
+`--vault`).
+
+**Late records.** When a turn's vault search is `slow`, the search keeps running in the
+background; when it finishes, one follow-up line records what the turn missed, record-only
+(nothing is injected later):
+
+```json
+{"type": "late", "ts": "…", "v": "0.17.0", "session": "…", "query_sha256": "…",
+ "snapshot_id": "<sha256>", "retrieval": "hybrid", "completed_ms": 2143.0, "budget_ms": 1500.0,
+ "would_inject": ["PROJECTS/x.md:3-9"], "pool": ["PROJECTS/x.md:3-9", "…"]}
+```
+
+`completed_ms` counts from the start of the turn; `would_inject` is what the gate would have
+injected (locators only, no text).
 
 It also writes one line per `evidence_bundle` and `episode_search` tool call (`{"type": "tool",
 "tool", "session", "k", "who", "results": [locators]}`) and one per skipped injected turn
@@ -386,7 +457,18 @@ pruned when a new day's file opens.
 `quoth eval online --log DIR [--days N]` reads it: turns, sessions, injected rate per store,
 empty-recall rate, probable-miss rate (a search tool call in the same session after a turn and
 before the next one), score distributions, statuses, query length and latency p50/p95 per
-stage. Aggregates only.
+stage. Aggregates only. Two joins answer the host questions:
+
+- **`explicit_join`**: each `evidence_bundle` call is joined to the last prefetch of its
+  session, note by note (a locator's path). `rate.injected` / `passed_not_injected` /
+  `pooled_not_passed` / `candidate_not_pooled` / `never_candidate` are the share of calls that
+  returned at least one such note; `rate.pooled_not_injected` (the turn had judged the note but
+  did not inject it) and `rate.never_pooled` (the turn's pool never had it) separate a ranking
+  or gate miss from a retrieval miss. `notes` counts the result notes per class.
+- **`late`**: the late records: `completed_ms` p10/p50/p90, `within` (share of late turns that
+  would have finished within a 2.0, 2.5 or 2.8 s budget; the plugin waits 3.0 s), and
+  `search_returned_late_note_rate` (when the session's next explicit search returned a note
+  the late search would have injected).
 
 ## The nightly gate and daily quality
 

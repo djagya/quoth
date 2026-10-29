@@ -44,6 +44,41 @@ the serving pointer to it ([FRESHNESS.md](docs/FRESHNESS.md#rebuilding-across-an
 - Bundles carry the `links` table; in a scoped bundle, links to notes outside the scope
   become `excluded`.
 
+### Serving
+
+- **Hybrid retrieval** for recall and `evidence_bundle` alike (`quoth.retrieval`): BGE-M3
+  cosine fused by reciprocal rank with the snapshot's BM25 and trigram lists and the notes the
+  query names (title, alias or path), so exact names and paths are found. The gate still
+  judges each hit's real cosine; a lexical-only hit below the floor passes only when the query
+  names its note (gate reason `name`). `--retrieval dense` (sidecar, `quoth mcp`, `eval run`)
+  keeps the cosine-only ranking for comparison.
+- **Per-note diversity**: recall serves at most 1 hit per note before any repeat, an explicit
+  bundle at most 2; an excerpt repeated at another path is returned once.
+- **`evidence_bundle` gains `path_prefix`** (a folder pre-filter, for names shared across
+  projects), **`path`** (read one note's chunks in order, optionally `#Heading`: follow a link),
+  and **`include_explicit`**. Every hit carries `project` (its top-level folder) and `links`
+  (resolved targets as fetchable paths; excluded targets as text only, never a path). A `path`
+  that names no served note answers `not_found`, the same for every reason.
+- **Freshness per hit**: with `--vault DIR` (sidecar and `quoth mcp`) each hit says `live`:
+  `same`, `changed` or `missing`, checked by stat and, only when needed, a hash (at most 10
+  stats and 3 hashes per call). Bundle provenance carries `indexed_at` (the manifest's
+  `built_at`). The recall block opens its vault section with `Vault indexed as of …`, marks a
+  changed note `[changed since indexing: read the live note]` and names a hit's links.
+- **Recall tiers**: recall never injects notes of the explicit tier
+  (`quoth.scopes.explicit_scopes()`); `evidence_bundle` includes them only with
+  `include_explicit`. Both filter before ranking.
+
+### Measurement
+
+- Prefetch-log records carry `snapshot_id`, `retrieval` and the gate settings; a `slow`
+  turn's search, once finished, logs a `late` record with its completion time and the
+  locators it would have injected.
+- `eval online` joins each explicit search to its session's last prefetch (`explicit_join`:
+  injected, pooled but not injected, never pooled) and reads the late tail (`late`).
+- `eval run` scores the explicit bundle beside the prefetch (`explicit` in the receipt),
+  records `config.retrieval`, takes `--retrieval` and `--vault`, and `--trace-out FILE` writes
+  a private per-row trace (query, exact recall block, explicit hits) for caller tests.
+
 ## 0.16.0 — one recall path, snapshot admission off the request path
 
 ### Recall

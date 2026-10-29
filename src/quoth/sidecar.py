@@ -225,6 +225,11 @@ class Quoth:
         self._init_lanes(episodes, episode_min_score, episodes_prefetch,
                          owner_episodes, owner_min_score, owner_prefetch)
 
+    @property
+    def retrieval(self) -> str | None:
+        """The vault retrieval mode ("hybrid" or "dense"), None without a snapshot."""
+        return getattr(self.evidence, "retrieval", None)
+
     # -------------------------------------------------------------- helpers
 
     def _owner_locator(self, session_id: str, quote: str | None, field: str) -> str:
@@ -273,7 +278,8 @@ class Quoth:
                "quote_verification": self.state_db is not None,
                "episodes": self._lane_health(self.assistant_lane),
                "owner_episodes": self._lane_health(self.owner_lane),
-               "relevance_gate": self.gate.status()}
+               "relevance_gate": self.gate.status(), "retrieval": self.retrieval,
+               "live_check": getattr(self.evidence, "live", None) is not None}
         if self.reranker is not None:
             out["reranker"] = self.reranker.status()
         return out
@@ -352,16 +358,21 @@ class Quoth:
         with self.lock:
             lexical_all = ledger.recall(self.conn, query, k=max(claim_pool, k_cand))
         ms = {"claims_lexical": _ms(t0)}
-        hits_all, dense_all = [], []
+        hits_all, dense_all, provenance = [], [], {}
         evidence_deadline = time.monotonic() + budget
         if future is not None:
             try:
                 done = future.result(timeout=budget)
                 hits_all, dense_all = done["hits"], done.get("claims", [])
+                provenance = done.get("provenance") or {}
                 ms.update(done.get("ms", {}))
                 status = "ok"
             except FutureTimeout:
                 status = "slow"
+                if not dry and self.prefetch_log is not None:
+                    # Record only: when the late search finishes, what it would have injected.
+                    future.add_done_callback(lambda f: self._log_late(
+                        f, started, query, session_id, k_evidence, vault_pool))
             except Exception:
                 status = "unavailable"
                 log.warning("prefetch evidence unavailable")
@@ -390,10 +401,17 @@ class Quoth:
         # Judge every candidate (dry runs report them all), then fill the slots from the pool
         # with those that pass: gate before the cut.
         query_terms = relevance.terms(query)
+        live_cost = None
         vault_gate = relevance.judge_vault(self.gate, query_terms, hits_all, k_evidence, vault_rerank)
         chosen = relevance.vault_pick(self.gate, [g["passed"] for g in vault_gate], vault_pool, k_evidence,
-                                      vault_rerank)
+                                      vault_rerank, notes=[h.get("path") for h in hits_all],
+                                      per_note=D.MAX_HITS_PER_NOTE["prefetch"])
         hits = [hits_all[i] for i in chosen]
+        if hits and hasattr(self.evidence, "check_live"):
+            cost = self.evidence.check_live(hits)  # the injected hits only: a few stats
+            if cost is not None:
+                ms["live"] = cost["ms"]
+                live_cost = cost
         claim_gate = {}
         for c, _, _ in candidates:
             # A claim's gate score is its cosine in the turn's dense pool, never a deeper
@@ -409,13 +427,15 @@ class Quoth:
             with self.lock:  # use_count counts what was injected, after the gate
                 ledger.mark_claims_used(self.conn, [c["id"] for c in claims])
         note = _vault_note(status, bool(hits_all[:vault_pool]), bool(hits))
-        out = {"text": format_recall(claims, hits, note), "claims": len(claims), "evidence": len(hits),
-               "evidence_status": status}
+        out = {"text": format_recall(claims, hits, note, provenance.get("indexed_at")), "claims": len(claims),
+               "evidence": len(hits), "evidence_status": status}
         if dry:
             out["detail"] = {"claims": [{"id": c["id"], "kind": c["kind"], "authority": c["authority"],
                                          "text": c["text"], "cosine": scores.get(c["id"])} for c in claims],
-                             "evidence": [{"locator": h["locator"], "note_date": h.get("note_date")}
+                             "evidence": [{"locator": h["locator"], "note_date": h.get("note_date"),
+                                           "project": h.get("project"), "live": h.get("live")}
                                           for h in hits],
+                             "provenance": provenance,
                              "vault_note": note}
         injected, picked = {c["id"] for c in claims}, set(chosen)
         claim_items = []
@@ -426,10 +446,13 @@ class Quoth:
                 claim_items[-1]["rerank_ms"] = pair_ms["claims"][c["id"]]
         trace = {"stores": {"claims": claim_items,
                             "vault": [{"locator": h["locator"], "score": h.get("cosine"),
+                                       "via": h.get("via"), "named": bool(h.get("named")),
                                        "pool": i < vault_pool, **g,
                                        "injected": i in picked, "_hit": h}
                                       for i, (h, g) in enumerate(zip(hits_all, vault_gate))]},
-                 "status": {"vault": status}, "ms": ms}
+                 "status": {"vault": status}, "ms": ms, "snapshot_id": provenance.get("snapshot_id")}
+        if live_cost is not None:
+            trace["live"] = {k: live_cost[k] for k in ("stats", "hashes", "unchecked")}
         for item, spent in zip(trace["stores"]["vault"], pair_ms["vault"]):
             if spent is not None:  # per-pair scoring time: `eval sweep` replays the live budget
                 item["rerank_ms"] = spent
@@ -450,12 +473,41 @@ class Quoth:
             from .prefetch_log import now_iso, query_digest, session_hash
             stores = {name: [{k: v for k, v in item.items() if not k.startswith("_")} for item in items]
                       for name, items in trace["stores"].items()}
-            self.prefetch_log.write({"type": "prefetch", "ts": now_iso(), "v": __version__,
-                                     "session": session_hash(session_id),
-                                     "query_sha256": query_digest(query), "query_len": len(query),
-                                     "stores": stores, "status": trace["status"], "ms": trace["ms"]})
+            record = {"type": "prefetch", "ts": now_iso(), "v": __version__,
+                      "session": session_hash(session_id),
+                      "query_sha256": query_digest(query), "query_len": len(query),
+                      "snapshot_id": trace.get("snapshot_id"), "retrieval": self.retrieval,
+                      "gate": self.gate.to_dict(),
+                      "stores": stores, "status": trace["status"], "ms": trace["ms"]}
+            if "live" in trace:
+                record["live"] = trace["live"]
+            self.prefetch_log.write(record)
         except Exception:
             log.warning("prefetch log record skipped")
+
+    def _log_late(self, future, started: float, query: str, session_id: str, k: int, pool: int) -> None:
+        """A `slow` turn's evidence finished after the turn answered: log when, and the
+        locators the gate would have injected (no text, nothing changes for the turn)."""
+        try:
+            if future.cancelled() or future.exception() is not None:
+                return
+            from .prefetch_log import now_iso, query_digest, session_hash
+            done = future.result()
+            hits = done["hits"]
+            judged = relevance.judge_vault(self.gate, relevance.terms(query), hits, k)
+            chosen = relevance.vault_pick(self.gate, [g["passed"] for g in judged], pool, k,
+                                          notes=[h.get("path") for h in hits],
+                                          per_note=D.MAX_HITS_PER_NOTE["prefetch"])
+            self.prefetch_log.write({
+                "type": "late", "ts": now_iso(), "v": __version__, "session": session_hash(session_id),
+                "query_sha256": query_digest(query),
+                "snapshot_id": (done.get("provenance") or {}).get("snapshot_id"),
+                "retrieval": self.retrieval, "completed_ms": _ms(started),
+                "budget_ms": round(self.evidence_budget * 1000, 1),
+                "would_inject": [hits[i]["locator"] for i in chosen],
+                "pool": [h["locator"] for h in hits[:pool]]})
+        except Exception:
+            log.warning("late prefetch record skipped")
 
     def _log_skip(self, session_id: str) -> None:
         try:
@@ -488,7 +540,7 @@ class Quoth:
         t0 = time.monotonic()
         queries = getattr(self.evidence, "queries", None)
         if queries is not None:
-            bundle = self.evidence.bundle(query, k, self.model, with_scores=True)
+            bundle = self.evidence.bundle(query, k, self.model, purpose="prefetch", with_scores=True)
         else:
             bundle = self.evidence.bundle(query, k, self.model)
         ms = {"vault": _ms(t0)}
@@ -498,7 +550,7 @@ class Quoth:
             embedder = queries.embedder(self.model)
             claims = self.claim_index.rank(queries.vector(self.model, embedder, query), k_claims)
             ms["claims_dense"] = _ms(t1)
-        return {"hits": bundle["hits"], "claims": claims, "ms": ms}
+        return {"hits": bundle["hits"], "claims": claims, "ms": ms, "provenance": bundle.get("provenance") or {}}
 
     def sync_claims(self) -> int:
         """Embed accepted claims missing from the claim index (bounded batch). Returns embedded."""
@@ -880,16 +932,28 @@ class Quoth:
         if self.evidence is None:
             raise SidecarError("evidence_unconfigured", 503)
         query, k = _opt_str(body, "query"), _opt_int(body, "k")
-        if query is None:
-            raise SidecarError("invalid_evidence_request")
+        path, prefix = _opt_str(body, "path"), _opt_str(body, "path_prefix")
+        include_explicit = body.get("include_explicit", False)
+        if not isinstance(include_explicit, bool):
+            raise SidecarError("invalid_include_explicit")
+        if (query is None) == (path is None):
+            raise SidecarError("invalid_evidence_request")  # exactly one of query and path
+        from .evidence_service import NoteNotFound
+        from .retrieval import RetrievalInputError
         from .serving import SnapshotUnavailable
         try:
-            result = self.evidence.bundle(query, 10 if k is None else k, self.model)
+            result = self.evidence.bundle(query, D.EVIDENCE_K if k is None else k, self.model, path=path,
+                                          path_prefix=prefix, include_explicit=include_explicit)
         except SnapshotUnavailable as exc:
             raise SidecarError("evidence_unavailable", 503) from exc
+        except NoteNotFound as exc:
+            raise SidecarError("not_found", 404) from exc
+        except RetrievalInputError as exc:
+            raise SidecarError(exc.code) from exc
         except ValueError as exc:
             raise SidecarError("invalid_evidence_request") from exc
-        self._log_tool("evidence_bundle", body, result)
+        if not body.get("dry_run"):  # eval runs are not the assistant's searches
+            self._log_tool("evidence_bundle", body, result)
         return result
 
     def mirror(self, body: dict) -> dict:
@@ -1343,9 +1407,37 @@ def render_view(app: "Quoth", raw: str) -> str:
     return VIEW_HELP
 
 
-def format_recall(claims: list[dict], hits: list[dict], vault_note: str | None = None) -> str:
+def indexed_label(built_at: str | None) -> str | None:
+    """"2026-10-28 03:12 UTC" from the manifest's UTC ISO-8601 `built_at`; None if unusable."""
+    from datetime import datetime, timezone
+    if not built_at:
+        return None
+    try:
+        when = datetime.fromisoformat(built_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is not None:
+        when = when.astimezone(timezone.utc)
+    return when.strftime("%Y-%m-%d %H:%M UTC")
+
+
+LIVE_MARKS = {"changed": " [changed since indexing: read the live note]",
+              "missing": " [no longer in the vault]"}
+RECALL_LINKS = 3  # linked notes named per hit in the recall block
+
+
+def links_fragment(hit: dict) -> str:
+    """" (links: A.md#Heading, B.md)" for a hit's resolved links, "" when it has none."""
+    names = [f"{link['path']}#{link['heading']}" if link.get("heading") else link["path"]
+             for link in hit.get("links") or [] if link.get("path")][:RECALL_LINKS]
+    return f" (links: {', '.join(names)})" if names else ""
+
+
+def format_recall(claims: list[dict], hits: list[dict], vault_note: str | None = None,
+                  indexed_at: str | None = None) -> str:
     """Compact per-turn context: accepted memory first, then vault evidence as data (or one
-    line saying why there is none: `VAULT_NOTES`)."""
+    line saying why there is none: `VAULT_NOTES`). Vault hits come under the snapshot's
+    build time; a hit whose note changed since gets a mark, and resolved links are named."""
     if not claims and not hits and vault_note is None:
         return ""
     lines = ["<quoth-recall>"]
@@ -1355,10 +1447,14 @@ def format_recall(claims: list[dict], hits: list[dict], vault_note: str | None =
             tag = " [inferred]" if c["authority"] == "assistant" else ""
             lines.append(f"- #{c['id']} {c['kind']}: {c['text']}{tag}")
     if hits:
+        label = indexed_label(indexed_at)
+        if label is not None:
+            lines.append(f"Vault indexed as of {label}")
         lines += [VAULT_HEADER, VAULT_HINT]
         for h in hits:
             when = f" (written {h['note_date']})" if h.get("note_date") else ""
-            lines.append(f"- {h['locator']}{when}: {relevance.vault_text(h)}")
+            mark = LIVE_MARKS.get(h.get("live"), "")
+            lines.append(f"- {h['locator']}{when}{mark}: {relevance.vault_text(h)}{links_fragment(h)}")
     elif vault_note is not None:
         lines.append(VAULT_NOTES[vault_note])
     lines.append("</quoth-recall>")
@@ -1617,6 +1713,12 @@ def main(argv=None) -> int:
                         "(default $HERMES_HOME/state.db; '' disables owner-authored claims)")
     p.add_argument("--db", help="serving snapshot or pointer for vault evidence (omit to disable evidence)")
     p.add_argument("--core-dir", help="published core directory (core.md); live compile otherwise")
+    p.add_argument("--vault", metavar="DIR",
+                   help="the live vault root, read-only: each hit says whether its note changed since"
+                        " indexing (omit: no per-hit freshness)")
+    p.add_argument("--retrieval", choices=D.RETRIEVAL_MODES, default=D.RETRIEVAL,
+                   help=f"vault ranking: hybrid (dense + BM25 + trigram + named notes, RRF) or dense"
+                        f" (default {D.RETRIEVAL})")
     p.add_argument("--model", default="bge-m3")
     p.add_argument("--mode", default="660",
                    help="socket permission bits, octal (the socket's permissions are the access control)")
@@ -1670,7 +1772,8 @@ def main(argv=None) -> int:
         # A bad pointer at startup is not fatal: the sidecar serves without evidence (health
         # red, 503) and the watcher admits the snapshot once the pointer names a valid one.
         snapshot = ServingSnapshot(args.db, require=False)
-        evidence = ReadOnlyEvidence(snapshot, warm_models=(args.model,))
+        evidence = ReadOnlyEvidence(snapshot, warm_models=(args.model,), retrieval=args.retrieval,
+                                    vault=args.vault)
         snapshot.start_watcher(args.snapshot_watch_interval)
     episodes = _open_episodes(args.episodes, args.model, evidence, args.episodes_max_age_days)
     owner_episodes = _open_episodes(args.owner_episodes, args.model, evidence, role="owner")

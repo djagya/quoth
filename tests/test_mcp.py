@@ -61,7 +61,10 @@ async def test_mcp_round_trip(db, tmp_path):
             assert props["k"]["minimum"] == 1 and props["k"]["maximum"] == 20
             assert props["query"]["maxLength"] == 2048 and props["query"]["minLength"] == 1
             assert "hash-ngram" in props["model"]["enum"]
-            assert all(props[name].get("description") for name in ("query", "k", "model"))
+            assert all(props[name].get("description")
+                       for name in ("query", "k", "model", "path_prefix", "path", "include_explicit"))
+            assert "ambiguous" in props["path_prefix"]["description"]
+            assert "owner asks" in props["include_explicit"]["description"]
 
             r = await session.call_tool("evidence_bundle", {"query": "tomatoes basil", "k": 5,
                                                               "model": "hash-ngram"})

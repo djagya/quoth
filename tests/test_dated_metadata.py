@@ -36,9 +36,10 @@ def test_note_date_basis_rules(path, metadata, expected):
 def jdb(tmp_path):
     vault = tmp_path / 'v'
     vault.mkdir()
-    for filename, created in [('2026-09-01.md', '2026-09-01'),
-                              ('2026-09-03.md', '2026-09-02')]:
-        (vault / filename).write_text(f'---\ncreated: {created}\n---\n# Journal\n\nWalked the dog in the park.\n')
+    # Different words: identical excerpts at two paths would be one hit (near-duplicate drop).
+    for filename, created, when in [('2026-09-01.md', '2026-09-01', 'morning'),
+                                    ('2026-09-03.md', '2026-09-02', 'evening')]:
+        (vault / filename).write_text(f'---\ncreated: {created}\n---\n# Journal\n\nWalked the dog in the park this {when}.\n')
     (vault / 'Dog notes.md').write_text('# Dog notes\n\nThe dog likes long walks.\n')
     db = tmp_path / 'j.db'
     conn = open_db(db)
@@ -173,7 +174,8 @@ async def test_mcp_default_only_dated_hits(jdb, tmp_path):
             await session.initialize()
             tools = (await session.list_tools()).tools
             assert {t.name for t in tools} == {'evidence_bundle'}
-            assert set(tools[0].input_schema['properties']) == {'query', 'k', 'model'}
+            assert set(tools[0].input_schema['properties']) == {'query', 'k', 'model', 'path_prefix', 'path',
+                                                                 'include_explicit'}
             result = await session.call_tool('evidence_bundle', {
                 'query': 'dog walk park', 'k': 3, 'model': 'hash-ngram'})
             assert not result.is_error
