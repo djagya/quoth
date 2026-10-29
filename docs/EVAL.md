@@ -364,7 +364,7 @@ JSON line per real (non-dry-run) prefetch to `DIR/prefetch-YYYY-MM-DD.jsonl` (UT
 directory 0700):
 
 ```json
-{"type": "prefetch", "ts": "…", "v": "0.15.0", "session": "<sha256(session_id)[:16]>",
+{"type": "prefetch", "ts": "…", "v": "0.16.0", "session": "<sha256(session_id)[:16]>",
  "query_sha256": "…", "query_len": 42,
  "stores": {"claims": [{"id": 12, "score": 0.71, "via": "dense", "pool": true, "gate_score": 0.71,
                         "lexical": 0.5, "passed": true, "gate": "off", "injected": true}],

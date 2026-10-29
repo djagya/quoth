@@ -3,7 +3,7 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
-## Unreleased
+## 0.16.0 — one recall path, snapshot admission off the request path
 
 ### Recall
 
