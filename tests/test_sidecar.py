@@ -842,3 +842,62 @@ def test_health_is_503_only_when_evidence_is_unavailable(served):
 def test_module_docstring_states_the_trust_boundary():
     doc = sidecar.__doc__
     assert "Trust boundary" in doc and "permissions" in doc and "socket" in doc
+
+
+
+# ------------------------------------------------------------------ plugin resilience
+
+class _FakeClient:
+    """A sidecar client stand-in: /v1/core answers or raises, /v1/prefetch returns `reply`."""
+
+    def __init__(self, unavailable, core="", reply=None):
+        self.unavailable, self.core, self.reply = unavailable, core, reply or {}
+        self.down = True
+        self.gets = 0
+
+    def get(self, path, timeout=None):
+        assert path == "/v1/core"
+        self.gets += 1
+        if self.down:
+            raise self.unavailable("down")
+        return {"ok": True, "text": self.core}
+
+    def post(self, path, body, timeout=None):
+        return {"ok": True, **self.reply}
+
+
+def _plugin_provider(monkeypatch, tmp_path):
+    plugin = _load_plugin(monkeypatch, REPO / "hermes_plugin" / "quoth")
+    p = plugin.QuothMemoryProvider(socket_path=str(tmp_path / "absent.sock"))
+    p.initialize("s1", hermes_home=str(tmp_path), platform="telegram", agent_context="primary")
+    return plugin, p
+
+
+def test_plugin_refetches_an_empty_core_at_most_once_a_minute(monkeypatch, tmp_path):
+    plugin, p = _plugin_provider(monkeypatch, tmp_path)
+    assert p._core == "" and p.system_prompt_block() == plugin.GUIDE  # sidecar was down
+    fake = p._client = _FakeClient(plugin.SidecarUnavailable, core="Alex lives in Quendorf.",
+                                   reply={"text": "x", "claims": 1})
+    fake.down = False
+    assert p.system_prompt_block() == plugin.GUIDE and fake.gets == 0  # tried under a minute ago
+    p._core_tried -= plugin.CORE_RETRY_SECONDS + 1
+    fake.down = True
+    p.prefetch("where does Alex live these days?")
+    assert fake.gets == 1 and p._core == ""  # still down: the next try waits another minute
+    p.prefetch("where does Alex live now?")
+    assert fake.gets == 1
+    p._core_tried -= plugin.CORE_RETRY_SECONDS + 1
+    fake.down = False
+    assert p.system_prompt_block().startswith("Alex lives in Quendorf.") and fake.gets == 2
+    p._core_tried -= plugin.CORE_RETRY_SECONDS + 1
+    p.system_prompt_block()
+    assert fake.gets == 2  # a core in hand is never refetched
+    assert plugin.CORE_RETRY_SECONDS == 60.0
+
+
+def test_plugin_recall_count_includes_the_owner_lane(monkeypatch, tmp_path):
+    plugin, p = _plugin_provider(monkeypatch, tmp_path)
+    p._client = _FakeClient(plugin.SidecarUnavailable, reply={
+        "text": "recall", "claims": 1, "evidence": 2, "episodes": 0, "owner_episodes": 2})
+    assert p.prefetch("where does Alex live these days?") == "recall"
+    assert p.recall_status().count == 5
