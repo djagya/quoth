@@ -1245,7 +1245,7 @@ def render_view(app: "Quoth", raw: str) -> str:
         lines = [f"Memory: {h['accepted_current']} accepted, {h['pending']} pending "
                  f"(oldest {h['oldest_pending_age_days'] or 0} days) — {h['status'].upper()}",
                  "Presort: " + (", ".join(f"{k} {v}" for k, v in presort.items()) or "nothing pending"),
-                 f"Vault snapshot: {snapshot.get('snapshot_id', snapshot.get('status', '?'))[:12]}",
+                 f"Vault snapshot: {(snapshot.get('snapshot_id') or '?')[:12]} ({snapshot.get('status', '?')})",
                  "Last 7 days: " + ", ".join(f"{k} {v}" for k, v in h["last_7d"].items() if v)]
         return "\n".join(lines) + "\n\n" + VIEW_HELP
     if cmd == "core":
