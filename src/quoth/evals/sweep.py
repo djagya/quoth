@@ -1,16 +1,18 @@
 """`eval sweep`: replay the relevance gate over a run's recorded candidates, per threshold.
 
 `eval run` records, per row, every candidate's signals (cosine, lexical coverage), which
-expected sources it matches (indices, no text), and whether serving would inject it.
-The sweep applies `relevance.Gate` configs to those records exactly as the sidecar
-would and scores each with the harness metrics (`metrics.block`). Ranked metrics count
-an expected source only where it would pass the gate (at its original rank).
+expected sources it matches (indices, no text), whether it is in the turn's live pool and
+whether it was injected. The sweep applies `relevance.Gate` configs to those records
+exactly as the sidecar would (judge every pool candidate, then inject the best that pass:
+`relevance.vault_pick`, the first PREFETCH_CLAIMS passing claims) and scores each with the
+harness metrics (`metrics.block`). Ranked metrics count an expected source only where it
+would pass the gate (at its original rank).
 
 It recommends the config that maximises injected precision plus abstain correctness
 (1 - abstain_nonempty_rate) while no injected metric (the block's hit rate, the vault's
 and the claims' injected hit rates) loses more than ``max_loss`` against no gate. Ranked
-candidate metrics (hit@5, recall@10) are reported, not constrained: live injects only the
-served prefix. Output holds configs and aggregates only.
+candidate metrics (hit@5, recall@10) are reported, not constrained: live injects only from
+the pool. Output holds configs and aggregates only.
 
 A run with a reranker (`eval run --rerank-model`, 0.13.2) also records each candidate's
 rerank score; the sweep then adds rerank configs (floor x gap x widen on the vault, a floor
@@ -24,6 +26,7 @@ from __future__ import annotations
 from itertools import product
 import math
 
+from .. import recall_defaults as D
 from .. import relevance
 from . import metrics as M
 from .format import STORES
@@ -37,16 +40,16 @@ CLAIMS_LEXICALS = (None, 0.25, 0.34, 0.5, 0.67, 1.0)
 # Only what reaches the block is constrained: gold at ranks live never injects (vault 4-10)
 # may fail the gate without costing the assistant anything.
 CONSTRAINTS = ("injected_hit_rate", "vault_injected_hit_rate", "claims_injected_hit_rate")
-PREFETCH_CLAIMS = 6  # sidecar.PREFETCH_CLAIMS (not imported: the sidecar module is heavy)
-PREFETCH_EVIDENCE = 3  # sidecar.PREFETCH_EVIDENCE
+PREFETCH_CLAIMS = D.PREFETCH_CLAIMS
+PREFETCH_EVIDENCE = D.PREFETCH_EVIDENCE
 COMBINE_TOP = 5
 # Rerank scores are sigmoid probabilities, bunched near 0 and 1: a log-like floor grid.
 RERANK_FLOORS = (0.001, 0.002, 0.005, 0.01, 0.02, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4,
                  0.5, 0.6, 0.7, 0.8, 0.9)
 RERANK_GAPS = (None, 0.2, 0.4, 0.6, 0.8, 0.9, 0.95)
 RERANK_WIDENS = (None, 5, 10)
-DEFAULT_RERANK_BUDGET = 0.8  # rerank.DEFAULT_BUDGET: the sidecar's --rerank-budget
-DEFAULT_EVIDENCE_BUDGET = 1.5  # sidecar.EVIDENCE_BUDGET: scoring also ends at this deadline
+DEFAULT_RERANK_BUDGET = D.RERANK_BUDGET  # the sidecar's --rerank-budget
+DEFAULT_EVIDENCE_BUDGET = D.EVIDENCE_BUDGET  # the sidecar's --evidence-budget: scoring also ends here
 
 
 class SweepError(ValueError):
@@ -63,24 +66,16 @@ def record(row: dict, candidates: dict, sources: list, timings: dict | None = No
     stores = {}
     for store in STORES:
         wanted = [s for s in sources if s["store"] == store]
-        items, dense_seen = [], 0
+        items = []
         for it in candidates.get(store) or []:
             lexical, matched = it.get("lexical"), it.get("matched")
-            if store in ("vault", "claims") and ("lexical" not in it or (store == "vault" and matched is None)):
-                lexical, matched = relevance.overlap(query_terms, it.get("text") or "")  # older sidecar
-            score = it.get("score")
-            if store == "claims":
-                # The gate judges a claim by its cosine in the serving dense list only. Older
-                # sidecars do not report it: the first PREFETCH_CLAIMS dense candidates (exact
-                # unless stale index entries sat above them).
-                if "gate_score" in it:
-                    score = it["gate_score"]
-                else:
-                    dense_seen += it.get("via") == "dense"
-                    score = score if it.get("via") == "dense" and dense_seen <= PREFETCH_CLAIMS else None
-            # Before 0.12.5 nothing was gated: what was injected was what was served.
-            item = {"score": score, "served": bool(it.get("served", it.get("injected"))),
-                    "injected": bool(it.get("injected"))}
+            if store == "vault" and (lexical is None or matched is None):
+                lexical, matched = relevance.overlap(query_terms, relevance.vault_text(it))
+            elif store == "claims" and lexical is None:
+                lexical = relevance.coverage(query_terms, it.get("text") or "")
+            # The gate judges a claim by its cosine in the turn's dense pool (`gate_score`).
+            score = it.get("gate_score") if store == "claims" else it.get("score")
+            item = {"score": score, "pool": bool(it.get("pool")), "injected": bool(it.get("injected"))}
             match = [i for i, s in enumerate(wanted) if M.matches(it, store, s)]
             # Optional keys are left out when empty (receipt size): lexical, matched, match, stale.
             if lexical is not None:
@@ -124,15 +119,13 @@ def _passes(gate: relevance.Gate, store: str, items: list[dict]) -> list[bool]:
 
 
 def _injected(gate: relevance.Gate, store: str, items: list[dict], passed: list[bool]) -> list[dict]:
-    """What reaches the block, in block order: the served items that pass, or with a rerank
-    widen (and scored hits) the best by rerank score among the top N that pass."""
-    if store == "vault" and gate.vault_rerank_widen is not None:
-        scores = _rerank(items)
-        if relevance.rerank_usable(gate, scores, len(items), PREFETCH_EVIDENCE):
-            order = relevance.vault_order(gate, len(items), PREFETCH_EVIDENCE, scores)
-            return [items[i] for i in order if passed[i]]
-    if store in ("vault", "claims"):
-        return [it for it, ok in zip(items, passed) if it["served"] and ok]
+    """What reaches the block, in block order, as the sidecar picks it: the best pool
+    candidates that pass (vault: `relevance.vault_pick`; claims: the first PREFETCH_CLAIMS)."""
+    if store == "vault":
+        pool = sum(it["pool"] for it in items)
+        return [items[i] for i in relevance.vault_pick(gate, passed, pool, PREFETCH_EVIDENCE, _rerank(items))]
+    if store == "claims":
+        return [it for it, ok in zip(items, passed) if it["pool"] and ok][:PREFETCH_CLAIMS]
     return [it for it in items if it["injected"]]
 
 
@@ -167,7 +160,7 @@ def fit(gate: relevance.Gate, rec: dict, budget_ms: float | None,
     """(the row as a live turn would score it, the scoring ms this config waits for, the ms
     it has; None when unknown). It has `budget_ms`, or less when the row's recorded
     evidence search (`dense_ms`) leaves less of `evidence_ms`. Live scores the vault hits
-    it reranks first, then the served claims; a pair ending past that is lost, and a vault
+    it reranks first, then the pool's claims; a pair ending past that is lost, and a vault
     list not fully scored is not used at all (cosine gate)."""
     if budget_ms is None or not gate.rerank_any:
         return rec, None, None
@@ -187,7 +180,7 @@ def fit(gate: relevance.Gate, rec: dict, budget_ms: float | None,
         return {**rec, "stores": stores}, spent, budget_ms
     clock, keep = spent, set()
     for i, it in enumerate(claims["items"]):
-        if "rerank_ms" in it and it["served"]:
+        if "rerank_ms" in it and it["pool"]:
             clock += it["rerank_ms"]
             if clock <= budget_ms:
                 keep.add(i)
@@ -267,13 +260,13 @@ def _steps(values: list[float]) -> list[float]:
     return [round(i / 100, 2) for i in range(lo, hi + 1)]
 
 
-def _served_scores(rows: dict, store: str) -> list[float]:
+def _pool_scores(rows: dict, store: str) -> list[float]:
     return [it["score"] for rec in rows.values() for it in (rec["stores"].get(store) or {}).get("items", [])
-            if it["served"] and it["score"] is not None]
+            if it["pool"] and it["score"] is not None]
 
 
 def vault_grid(rows: dict, cosines=None, gaps=VAULT_GAPS, rescues=VAULT_RESCUES) -> list[relevance.Gate]:
-    cosines = [None, *(_steps(_served_scores(rows, "vault")) if cosines is None else cosines)]
+    cosines = [None, *(_steps(_pool_scores(rows, "vault")) if cosines is None else cosines)]
     out = []
     for c, g, r in product(cosines, gaps, rescues):
         if c is not None or g is not None:  # a rescue alone gates nothing (and is refused)
@@ -301,7 +294,7 @@ def claims_rerank_grid(rows: dict, floors=RERANK_FLOORS) -> list[relevance.Gate]
 
 
 def claims_grid(rows: dict, cosines=None, lexicals=CLAIMS_LEXICALS) -> list[relevance.Gate]:
-    cosines = [None, *(_steps(_served_scores(rows, "claims")) if cosines is None else cosines)]
+    cosines = [None, *(_steps(_pool_scores(rows, "claims")) if cosines is None else cosines)]
     return [g for g in (relevance.Gate(claims_min_cosine=c, claims_min_lexical=x)
                         for c, x in product(cosines, lexicals)) if g.claims_on]
 
@@ -349,8 +342,8 @@ def sweep(receipt: dict, *, max_loss: float = DEFAULT_MAX_LOSS, vault_cosines=No
     recommended = candidates[0] if candidates and objective(candidates[0]) > objective(base) else None
     vault_scored = [it["score"] is not None for rec in rows.values()
                     for it in (rec["stores"].get("vault") or {}).get("items", [])]
-    served = [it for rec in rows.values() for it in (rec["stores"].get("vault") or {}).get("items", [])
-              if it["served"]]
+    served = [it for rec in rows.values()
+              for it in (rec["stores"].get("vault") or {}).get("items", [])[:PREFETCH_EVIDENCE]]
     # Turns without scores keep the cosine gate: the best cosine-only vault config is the fallback.
     fallback = None
     if recommended is not None and relevance.Gate.from_dict(recommended["gate"]).rerank_on:

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import sys
 
+from .. import recall_defaults as D
 from ..assets import eval_path
 from .format import EvalSetError
 
@@ -50,7 +51,7 @@ def _target(a):
     gate = relevance.from_args(a)
     reranker = rerank.from_args(a, gate)
     if a.socket:
-        if gate != relevance.Gate() or reranker is not None:
+        if gate != relevance.default_gate() or reranker is not None:
             raise RunError("gate and rerank flags apply in-process only; a live sidecar uses its own"
                            " (see /v1/health)")
         target = SocketTarget(a.socket, evidence_budget=30.0 if a.evidence_budget is None else a.evidence_budget)
@@ -71,7 +72,7 @@ def _target(a):
         db=a.db, ledger=a.ledger, state_db=a.state_db, episodes=a.episodes,
         owner_episodes=a.owner_episodes, model=a.model, evidence_budget=a.evidence_budget,
         episodes_prefetch=a.episodes_prefetch == "on", owner_prefetch=a.owner_prefetch == "on",
-        episode_min_score=a.episode_min_score, owner_min_score=a.owner_min_score, gate=gate,
+        assistant_min_score=a.assistant_min_score, owner_min_score=a.owner_min_score, gate=gate,
         reranker=reranker)
 
 
@@ -207,10 +208,11 @@ def main(argv=None) -> int:
     pr.add_argument("--model", default=None,
                     help="embedding model (default: the fixture's recorded model, else bge-m3)")
     pr.add_argument("--evidence-budget", type=float, default=None,
-                    help="seconds prefetch waits for evidence (in-process default: the sidecar's 1.5; --socket default: 30)")
+                    help=f"seconds prefetch waits for evidence (in-process default: the sidecar's"
+                         f" {D.EVIDENCE_BUDGET:g}; --socket default: 30)")
     pr.add_argument("--episodes-prefetch", choices=("on", "off"), default="off")
     pr.add_argument("--owner-prefetch", choices=("on", "off"), default="on")
-    pr.add_argument("--episode-min-score", type=float)
+    pr.add_argument("--assistant-min-score", type=float)
     pr.add_argument("--owner-min-score", type=float)
     pr.add_argument("--k-candidates", type=int, default=10, help="candidates per store (max 20)")
     pr.add_argument("--gold-drift", action="store_true",
@@ -244,10 +246,10 @@ def main(argv=None) -> int:
     ps.add_argument("--vault-rerank-widens", help="comma list of rerank widens, hits ('none' = off; at most"
                                                   " the run's --k-candidates)")
     ps.add_argument("--claims-reranks", help="comma list of claim rerank floors")
-    ps.add_argument("--rerank-budget", type=float, default=0.8,
+    ps.add_argument("--rerank-budget", type=float, default=D.RERANK_BUDGET,
                     help="the live sidecar's --rerank-budget (s): rerank configs replay it on the recorded"
                          " per-pair scoring times; one whose p95 exceeds it is not eligible")
-    ps.add_argument("--evidence-budget", type=float, default=1.5,
+    ps.add_argument("--evidence-budget", type=float, default=D.EVIDENCE_BUDGET,
                     help="the live sidecar's --evidence-budget (s): scoring also ends at this deadline,"
                          " after the row's recorded evidence search")
     ps.add_argument("--format", choices=("table", "json"), default="table")
