@@ -217,7 +217,13 @@ and excerpt, so it stays on the host, never in Git.
 ```
 
 `explicit` is the row's explicit `evidence_bundle` (`live` is null without `--vault`).
-An oracle (hand-labelled decisive sources) is added by the caller, outside quoth.
+
+`--oracle FILE` (with `--trace-out`) joins a caller's oracle, hand-labelled decisive source
+text, to the trace by row id: `FILE` is JSONL of `{"id": "<row id>", "oracle": <any JSON,
+e.g. [{"locator", "text"}]>}`. The join goes to a separate private file (`--oracle-out`,
+default `TRACE.oracle.jsonl`, mode 0600, with its own warning): each trace line plus `oracle`
+(null when the file has no row for it) and `oracle_found`. The trace itself never holds oracle
+text. stderr reports how many rows matched and how many oracle ids the run did not have.
 
 ### Compare and exit codes
 

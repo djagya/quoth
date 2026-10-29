@@ -92,7 +92,9 @@ the serving pointer to it ([FRESHNESS.md](docs/FRESHNESS.md#rebuilding-across-an
   dropped and unjoined lines, and a descriptive note overlap with the next explicit search.
 - `eval run` scores the explicit bundle beside the prefetch (`explicit` in the receipt),
   records `config.retrieval`, takes `--retrieval` and `--vault`, and `--trace-out FILE` writes
-  a private per-row trace (query, exact recall block, explicit hits) for caller tests.
+  a private per-row trace (query, exact recall block, explicit hits) for caller tests;
+  `--oracle FILE` joins a caller's oracle source text to it by row id, into a separate
+  private file (`--oracle-out`).
 
 ## 0.16.0 — one recall path, snapshot admission off the request path
 
