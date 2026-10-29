@@ -46,20 +46,36 @@ def trigram_query(query: str) -> str | None:
     return " OR ".join(dict.fromkeys(parts)) or None
 
 
-def _run(conn, table: str, match: str, limit: int):
+def _run(conn, table: str, match: str, limit: int, *, where: str = "", params: tuple = (),
+         ids_only: bool = False):
+    """One FTS5 list, best BM25 first. `where` (an SQL fragment starting with " AND", over
+    `s` = sources) pre-filters the candidates; `ids_only` skips the scores and snippet."""
     w = ", ".join(str(x) for x in BM25_WEIGHTS)
+    columns = (f"c.id AS chunk_id" if ids_only else
+               f"c.id AS chunk_id, s.path, c.heading_path, c.line_start, c.line_end, s.scope,"
+               f" bm25({table}, {w}) AS bm25,"
+               f" snippet({table}, 2, '**', '**', ' … ', {SNIPPET_TOKENS}) AS snippet")
     sql = (
-        f"SELECT c.id AS chunk_id, s.path, c.heading_path, c.line_start, c.line_end, s.scope,"
-        f" bm25({table}, {w}) AS bm25,"
-        f" snippet({table}, 2, '**', '**', ' … ', {SNIPPET_TOKENS}) AS snippet"
+        f"SELECT {columns}"
         f" FROM {table} f"
         f" JOIN chunks c ON c.id = f.rowid"
         f" JOIN source_versions v ON v.id = c.source_version_id AND v.is_current = 1"
         f" JOIN sources s ON s.id = v.source_id"
-        f" WHERE {table} MATCH ?"
-        f" ORDER BY bm25 LIMIT ?"
+        f" WHERE {table} MATCH ?{where}"
+        f" ORDER BY bm25({table}, {w}) LIMIT ?"
     )
-    return conn.execute(sql, (match, limit)).fetchall()
+    return conn.execute(sql, (match, *params, limit)).fetchall()
+
+
+def lexical_lists(conn, query: str, limit: int, *, where: str = "", params: tuple = ()) -> dict[str, list[int]]:
+    """{retriever name: chunk ids best first} for the BM25 and trigram lists (serving's
+    hybrid retrieval fuses these with the dense list)."""
+    out = {}
+    for name, table, build in RETRIEVERS:
+        match = build(query)
+        out[name] = [r[0] for r in _run(conn, table, match, limit, where=where, params=params,
+                                        ids_only=True)] if match else []
+    return out
 
 
 RETRIEVERS = (("bm25", "chunks_fts", unicode61_query), ("trigram", "chunks_fts_trigram", trigram_query))

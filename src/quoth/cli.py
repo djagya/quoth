@@ -176,7 +176,8 @@ def _cmd_bundle(a) -> int:
 
 def _cmd_mcp(a) -> int:
     from .mcp_server import _exit_now, main as mcp_main
-    _exit_now(mcp_main(["--db", str(_evidence_db(a.db))]))
+    _exit_now(mcp_main(["--db", str(_evidence_db(a.db)), *(["--vault", a.vault] if a.vault else []),
+                        "--retrieval", a.retrieval]))
     return 0  # not reached
 
 
@@ -283,6 +284,8 @@ def build_parser() -> argparse.ArgumentParser:
     pmc = sub.add_parser("mcp", help="serve read-only evidence from a snapshot over MCP (stdio)")
     pmc.add_argument("--db", default=None,
                      help=f"snapshot DB, or a symlink to one (default $QUOTH_HOME/{EVIDENCE_DB})")
+    pmc.add_argument("--vault", default=None, help="live vault root (read-only): per-hit freshness")
+    pmc.add_argument("--retrieval", choices=("hybrid", "dense"), default="hybrid")
     pmc.set_defaults(func=_cmd_mcp)
     return p
 
