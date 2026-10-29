@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import anyio
 import json
 from pathlib import Path
 import sqlite3
@@ -175,6 +176,11 @@ async def test_serving_pointer_stdio_swap_and_missing_target(db, tmp_path):
 
             assert await identity() == sha(db)
             replace_pointer(pointer, second)
+            # The watcher (5 s interval) validates and swaps in the background.
+            for _ in range(80):
+                if await identity() == sha(second):
+                    break
+                await anyio.sleep(0.25)
             assert await identity() == sha(second)
             pointer.unlink()
             pointer.symlink_to(tmp_path / 'missing.db')

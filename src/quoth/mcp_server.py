@@ -3,7 +3,8 @@
 ``quoth mcp --db PATH`` serves one tool, ``evidence_bundle``: dense top-k excerpts from
 an existing snapshot (a frozen DB, or a symlink pointer to one that may be swapped while
 the server runs). The server never writes: the snapshot is opened read-only and validated
-before the first call. Invalid input and retrieval failures are raised, so a client always
+before the first call; a pointer is watched in the background, and a new target is
+validated and warmed before it is served (see `quoth.serving`). Invalid input and retrieval failures are raised, so a client always
 sees them as tool errors (``isError``), never as data.
 """
 
@@ -23,7 +24,7 @@ from pydantic import Field
 from . import __version__
 from .embed.backends import DEFAULT_MODEL, MODELS
 from .evidence_service import ReadOnlyEvidence
-from .serving import ServingSnapshot
+from .serving import WATCH_INTERVAL, ServingSnapshot
 
 MAX_K = 20
 MAX_QUERY_CHARS = 2048
@@ -39,15 +40,18 @@ Model = Annotated[str, Field(
                 " unless the snapshot was built with another model.")]
 
 
-def build_server(db_path: str, warm_models: tuple[str, ...] = ()) -> MCPServer:
+def build_server(db_path: str, warm_models: tuple[str, ...] = (),
+                 watch_interval: float = WATCH_INTERVAL) -> MCPServer:
     """Open and validate the snapshot, then register the read-only evidence tool.
 
-    `warm_models` load in a daemon thread so the stdio handshake never waits on them.
+    `warm_models` load in a daemon thread so the stdio handshake never waits on them, and
+    are warmed on each new pointer target before it is admitted.
     """
     server = MCPServer(name="quoth", version=__version__)
     # The SDK may dispatch tool calls on a different thread than startup.
     snapshot = ServingSnapshot(db_path)
-    evidence = ReadOnlyEvidence(snapshot)
+    evidence = ReadOnlyEvidence(snapshot, warm_models=warm_models)
+    snapshot.start_watcher(watch_interval)
 
     @server.tool(name="evidence_bundle", annotations=ToolAnnotations(
         read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))

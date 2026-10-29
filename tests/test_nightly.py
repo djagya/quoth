@@ -140,9 +140,16 @@ def test_pointer_invalid_change_retains_old(tmp_path, bad):
     if bad == 'regular':
         pointer.unlink()
         pointer.write_text('bad')
+    assert serving.poll() == 'rejected'
     with serving.lease() as (conn, identity):
         assert identity == sha(src)
         assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    health = serving.health()
+    assert health['status'] == 'pointer_rejected' and health['snapshot_id'] == sha(src)
+    assert health['rejected']['reason'] == {'digest': 'manifest_invalid', 'manifest': 'manifest_invalid',
+                                            'missing': 'target_missing',
+                                            'regular': 'pointer_not_symlink'}[bad]
+    assert str(tmp_path) not in json.dumps(health)  # no paths from the pointer or manifest
     serving.close()
 
 
@@ -165,11 +172,14 @@ def test_concurrent_call_during_swap_leases_old_until_finished(tmp_path):
         first = pool.submit(in_flight)
         assert ready.wait(5)
         replace_pointer(pointer, candidate)
-        second = pool.submit(next_call)
-        assert not second.done()
+        # The watcher validates off the lock, then waits for the in-flight call to swap.
+        swap = pool.submit(serving.poll)
+        threading.Event().wait(0.5)
+        assert not swap.done()
         finish.set()
         assert first.result(5) == sha(src)
-        assert second.result(5) == sha(candidate)
+        assert swap.result(10) == 'admitted'
+        assert next_call() == sha(candidate)
     serving.close()
 
 

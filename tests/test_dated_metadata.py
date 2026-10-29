@@ -140,11 +140,13 @@ def test_snapshot_replace_and_close_drop_metadata_cache(jdb, tmp_path):
         with serving.lease() as (old, identity):
             assert date_index(old).by_path['2026-09-01.md'][0] == '2026-09-01'
         replace_pointer(pointer, second)
+        assert serving.poll() == 'admitted'
         with serving.lease() as (new, identity):
             assert old not in _DATE_CACHE
             assert date_index(new).by_path['2026-09-01.md'] == (None, 'filename_only')
         pointer.unlink()
         pointer.symlink_to(tmp_path / 'missing.db')
+        assert serving.poll() == 'rejected'
         with serving.lease() as (active, _):
             assert active is new and active in _DATE_CACHE
     finally:

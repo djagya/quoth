@@ -31,9 +31,13 @@ def align_scores(hits: list[dict], ranked: list[tuple[str | None, float]]) -> No
 class ReadOnlyEvidence:
     """Dense top-k evidence with bounded text from a `ServingSnapshot`; caches per snapshot."""
 
-    def __init__(self, snapshot):
+    def __init__(self, snapshot, warm_models: tuple[str, ...] = ()):
+        """`warm_models` are warmed on every snapshot candidate before it is admitted."""
         self.snapshot = snapshot
         self.queries = serving_cache.QueryEmbedder()
+        self.warm_models = tuple(warm_models)
+        if hasattr(snapshot, "prepare"):
+            snapshot.prepare = self.prepare
 
     def bundle(self, query, k: int = 10, model: str = "bge-m3", *, with_scores: bool = False,
                cache_query: bool = True) -> dict:
@@ -99,6 +103,29 @@ class ReadOnlyEvidence:
             raise RuntimeError(f"read-only evidence has invalid vectors for {model}")
         st.vectors_ok.add(model)
 
+    def _warm_conn(self, conn, model: str):
+        """Vector check, matrix and date index of `conn` for `model`; raises when unusable."""
+        st = serving_cache.state(conn)
+        self.check_vectors(st, model)
+        st.matrix(model)
+        st.dates()
+        return st
+
+    def prepare(self, conn) -> None:
+        """Snapshot candidate warmup (admission watcher, off the request path): vector check,
+        matrix, dates and a test query, so the first turn after a swap is warm.
+
+        Best-effort, like the startup warmup: a model without vectors, or an embedder that
+        cannot load, leaves that model cold and the call path fails closed as before.
+        """
+        for model in self.warm_models:
+            try:
+                st = self._warm_conn(conn, model)
+                embedder = self.queries.embedder(model)
+                self.queries.topk(st, model, embedder, "warmup", 1, cache=False)  # a test query
+            except Exception:
+                logging.getLogger(__name__).warning("snapshot candidate warmup skipped for %s", model)
+
     def warm(self, models) -> None:
         """Best-effort cold-start warmup; a failure here only leaves the call path cold.
 
@@ -109,12 +136,12 @@ class ReadOnlyEvidence:
         for model in models:
             try:
                 with self.snapshot.lease() as (active, _):
-                    st = serving_cache.state(active)
-                    self.check_vectors(st, model)
-                    st.matrix(model)
-                    st.dates()
+                    self._warm_conn(active, model)
+            except Exception:
+                # No exception text/paths, as in serving admission.
+                log.warning("read-only snapshot warmup skipped for %s", model)
+            try:
                 # Load outside the lease: a concurrent call waits only for this model.
                 self.queries.embedder(model).embed_query("warmup")
             except Exception:
-                # No exception text/paths, as in serving.lease.
-                log.warning("read-only warmup skipped for %s", model)
+                log.warning("read-only embedder warmup skipped for %s", model)
