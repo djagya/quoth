@@ -4,7 +4,8 @@ Rows (each PASS, WARN or FAIL):
 
 - ``quoth/venv``           the install's interpreter resolves and runs
 - ``quoth/heartbeat``      the nightly refresh heartbeat (``quoth-heartbeat/v1``)
-- ``quoth/sidecar``        ``/v1/health`` answers on the socket, evidence ok, quotes verifiable
+- ``quoth/sidecar``        ``/v1/health`` answers on the socket, evidence ok (the pointer's target
+                           admitted), quotes verifiable; WARN while a configured reranker is unavailable
 - ``quoth/review-queue``   pending review backlog (WARN, never FAIL: a backlog is not an outage)
 - ``quoth/episodes``       the assistant lane's background tick
 - ``quoth/owner-episodes`` the owner lane's background tick
@@ -63,6 +64,10 @@ def _reasons(values) -> str:
     kept = [v for v in values if isinstance(v, str) and _TOKEN.fullmatch(v)]
     other = len(values) - len(kept)
     return ", ".join(kept + ([f"+{other} other"] if other else []))
+
+
+def _token(value) -> str | None:
+    return value if isinstance(value, str) and _TOKEN.fullmatch(value) else None
 
 
 def _stamp(value) -> str:
@@ -162,11 +167,22 @@ def check_sidecar(sock_path: Path, *, timeout: float = 5.0) -> list[dict]:
     rows = []
     version = health.get("version") if isinstance(health.get("version"), str) and \
         _VERSION.fullmatch(health["version"]) else "?"
-    evidence = (health.get("evidence") or {}).get("status")
-    evidence = evidence if isinstance(evidence, str) and _TOKEN.fullmatch(evidence) else None
+    block = health.get("evidence") if isinstance(health.get("evidence"), dict) else {}
+    evidence = _token(block.get("status"))
+    rejected = block.get("rejected") if isinstance(block.get("rejected"), dict) else None
+    reranker = health.get("reranker") if isinstance(health.get("reranker"), dict) else None
+    rerank_state = _token(reranker.get("status")) if reranker is not None else None
     if evidence != "ok" or not health.get("quote_verification"):
+        detail = f"evidence={evidence}"
+        if rejected is not None:  # why the pointer's target is not served: reason class + digest only
+            detail += (f" (pointer {_token(rejected.get('reason'))}, target {_token(rejected.get('target_digest'))},"
+                       f" since {_stamp(rejected.get('since'))})")
         rows.append(_row("FAIL", "quoth/sidecar",
-                         f"evidence={evidence} quote_verification={bool(health.get('quote_verification'))}"))
+                         f"{detail} quote_verification={bool(health.get('quote_verification'))}"))
+    elif rerank_state == "unavailable":
+        rows.append(_row("WARN", "quoth/sidecar",
+                         f"v{version} evidence ok; reranker unavailable (attempt {_count(reranker.get('attempts'))},"
+                         f" retry in {_count(reranker.get('retry_in_s'))} s; turns keep the cosine gate)"))
     else:
         rows.append(_row("PASS", "quoth/sidecar", f"v{version} evidence ok"))
     rows[0]["version"] = version if version != "?" else None

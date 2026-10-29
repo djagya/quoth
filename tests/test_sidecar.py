@@ -828,7 +828,7 @@ def test_health_is_503_only_when_evidence_is_unavailable(served):
     assert set(body) >= {"episodes", "owner_episodes", "ledger", "evidence"}
 
     class Gone:
-        def lease(self):
+        def health(self):
             raise OSError("snapshot gone")
     app.evidence.snapshot, real = Gone(), app.evidence.snapshot
     try:

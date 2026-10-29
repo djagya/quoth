@@ -172,6 +172,35 @@ def test_sidecar_red(tmp_path, fake, heartbeat, over):
     assert row["status"] == "FAIL"
 
 
+def test_a_rejected_pointer_is_fail_with_its_reason_and_digest_only(tmp_path, fake, heartbeat):
+    fake.body["evidence"] = {"status": "pointer_rejected", "snapshot_id": "snap-1", "state": "rejected",
+                             "rejected": {"reason": "manifest_invalid", "target_digest": "0123456789abcdef",
+                                          "since": stamp(NOW), "attempts": 2, "retry_in_s": 900.0}}
+    row = rows_by_name(everything(tmp_path, fake))["quoth/sidecar"]
+    assert row["status"] == "FAIL"
+    assert "evidence=pointer_rejected (pointer manifest_invalid, target 0123456789abcdef" in row["detail"]
+    fake.body["evidence"]["rejected"]["reason"] = "/srv/" + SENTINEL  # never echoed
+    row = rows_by_name(everything(tmp_path, fake))["quoth/sidecar"]
+    assert SENTINEL not in row["detail"] and "pointer None" in row["detail"]
+
+
+@pytest.mark.parametrize("token", ["candidate_stalled", "watcher_stalled"])
+def test_a_stalled_admission_is_fail(tmp_path, fake, heartbeat, token):
+    fake.body["evidence"] = {"status": token, "snapshot_id": "snap-1"}
+    row = rows_by_name(everything(tmp_path, fake))["quoth/sidecar"]
+    assert row["status"] == "FAIL" and f"evidence={token}" in row["detail"]
+
+
+def test_an_unavailable_reranker_is_warn(tmp_path, fake, heartbeat):
+    fake.body["reranker"] = {"status": "unavailable", "attempts": 2, "retry_in_s": 280.0}
+    rows = everything(tmp_path, fake)
+    row = rows_by_name(rows)["quoth/sidecar"]
+    assert row["status"] == "WARN" and "reranker unavailable (attempt 2, retry in 280.0 s" in row["detail"]
+    assert health.exit_code(rows) == 0
+    fake.body["reranker"] = {"status": "ready", "attempts": 1, "retry_in_s": None}
+    assert rows_by_name(everything(tmp_path, fake))["quoth/sidecar"]["status"] == "PASS"
+
+
 def test_review_queue_backlog_is_warn(tmp_path, fake, heartbeat):
     fake.body["ledger"].update(status="red", reasons=["pending_queue_old"], pending=50)
     rows = everything(tmp_path, fake)
