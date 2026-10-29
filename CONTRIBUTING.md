@@ -24,6 +24,38 @@ explains how the pieces fit together.
 - Bump `version` in `pyproject.toml` when the change ships in the wheel, and add a line to
   [`CHANGELOG.md`](CHANGELOG.md).
 
+## Commit messages
+
+quoth uses [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). `main` is
+squash-merge only and the squash commit takes the **pull request title**, so the title is
+what must follow the format; CI checks it (`conventional-title`) and merging needs it green.
+Write your branch commits the same way.
+
+```
+<type>[(scope)][!]: <description>
+```
+
+| Type | Use for |
+|---|---|
+| `feat` | a new capability users can see (CLI, MCP, sidecar, plugin, WebUI) |
+| `fix` | a bug fix |
+| `perf` | faster or leaner, same behaviour |
+| `refactor` | code change with no behaviour change |
+| `docs` | documentation only |
+| `test` | tests only |
+| `build` | packaging, dependencies, the Docker image |
+| `ci` | GitHub workflows and Dependabot |
+| `chore`, `style`, `revert` | maintenance, formatting, reverting a commit |
+
+- Scope is optional and names the area: `sidecar`, `ledger`, `mcp`, `cli`, `evals`, `plugin`,
+  `webui`, `snapshot`, `deps`.
+- Description: imperative, lower-case start, no trailing period, at most 100 characters in all.
+- A breaking change gets `!` after the type or scope (`feat(cli)!: …`) and a
+  `BREAKING CHANGE:` paragraph in the body (the PR description becomes the commit body).
+
+Examples: `feat(models): verify every download against its pinned sha256`,
+`fix(sidecar): reject a negative Content-Length`, `build(deps): bump numpy from 2.3 to 2.4`.
+
 ## Rules that keep snapshots valid
 
 - **Index-contract files.** Editing a file listed in `CODE_FILES` in `src/quoth/refresh.py`
