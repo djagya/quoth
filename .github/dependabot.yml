@@ -2,6 +2,9 @@ version: 2
 updates:
   - package-ecosystem: uv
     directory: /
+    commit-message:
+      prefix: build
+      include: scope
     schedule:
       interval: weekly
       day: monday
@@ -13,6 +16,9 @@ updates:
         update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /
+    commit-message:
+      prefix: ci
+      include: scope
     schedule:
       interval: weekly
       day: monday

@@ -1,0 +1,29 @@
+name: Conventional PR title
+
+# main is squash-merge only and the squash commit takes the pull request title, so the title
+# is the commit message that lands. It must follow Conventional Commits:
+#   <type>[(scope)][!]: <description>
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  conventional-title:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check the title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: [^ ].{0,98}[^. ]$'
+          if printf '%s' "$TITLE" | grep -Eq "$pattern"; then
+            echo "ok: $TITLE"
+          else
+            echo "::error::PR title is not a Conventional Commit: '$TITLE'"
+            echo "Expected '<type>[(scope)][!]: <description>' (max 100 chars, no trailing period),"
+            echo "type one of feat fix docs style refactor perf test build ci chore revert."
+            exit 1
+          fi

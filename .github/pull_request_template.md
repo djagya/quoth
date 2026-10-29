@@ -1,3 +1,6 @@
+<!-- Title: a Conventional Commit, e.g. `fix(sidecar): reject a negative Content-Length`.
+     It becomes the squash commit on main; see CONTRIBUTING.md "Commit messages". -->
+
 ## What and why
 
 <!-- What this changes, and the reason for it. Link the issue if there is one. -->
