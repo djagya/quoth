@@ -2,7 +2,8 @@
 
 `legacy_evaluate_pair` is a frozen copy of the retired evaluator (golden-v1 rows, dense
 `search` -> `evidence_bundle(k=10)` -> the private runner's scorer), kept here as the test
-oracle. Both engines score the same snapshot pairs, built from the public fixture vault
+oracle; its ranking gets the serving pool's per-note cap (`one_per_note`), so parity checks
+the gate's decisions on the ranking serving uses. Both engines score the same snapshot pairs, built from the public fixture vault
 with a deterministic 1024-dim hash embedder standing in for bge-m3, and every scenario's
 gate decision (outcome, reasons, lost and excused ids, gold drift) must agree in both gate
 modes. Scenarios cover each outcome: SWITCH, HOLD on lost gold, lost gold excused because
@@ -43,6 +44,16 @@ def metrics(h5, h10, expected):
 '''
 
 
+def one_per_note(hits, k=10):
+    """The serving pool's per-note cap (1 hit per note before any repeat, from a 4k-deep
+    dense list), the one deliberate change to the frozen ranking since v0.11.0."""
+    seen, first, rest = set(), [], []
+    for h in hits:
+        (rest if h["path"] in seen else first).append(h)
+        seen.add(h["path"])
+    return (first + rest)[:k]
+
+
 def legacy_evaluate_pair(current, candidate, golden_rows, private_rows, adapter):
     """Frozen v0.11.0 `nightly._evaluate_pair` scoring (inputs already loaded)."""
     rows = {"private": private_rows, "synthetic": golden_rows}
@@ -63,8 +74,8 @@ def legacy_evaluate_pair(current, candidate, golden_rows, private_rows, adapter)
                     expected = set(q["expected_paths"])
                     if not expected or q.get("kind") == "adversarial":
                         continue
-                    hits = search(conn, q["question"], k=10, retriever="dense",
-                                  model="bge-m3", embedder=EMB)
+                    hits = one_per_note(search(conn, q["question"], k=40, retriever="dense",
+                                               model="bge-m3", embedder=EMB))
                     row_aliases = {p: aliases[p] for p in original_paths[dataset][q["id"]] if p in aliases}
                     bundle = canonical_hits(evidence_bundle(hits, k=10)["hits"], row_aliases,
                                             old_inventory if db == current else None)
@@ -130,6 +141,8 @@ def drift_excessive(vault):
     (vault / "JOURNAL" / "2026-03-14.md").unlink()
 
 
+CROSS_SCRIPT = {"p04"}
+
 SCENARIOS = {
     # name: (vault change, expected (content-mode outcome, code-mode outcome) or "drift")
     "switch": (switch, ("SWITCH", "SWITCH")),
@@ -176,8 +189,12 @@ def test_old_and_new_gate_decisions_agree_on_the_public_fixture(scenario, base, 
 
     # The golden-v1-expressible part of the public set: vault rows and unanswerables (the
     # legacy evaluator refused rows whose only gold is in claims or the episode lanes).
+    # p04 (an English question, a Russian-titled note) is left out: the hash embedder shares
+    # no trigrams across the scripts, so the note ranks by hash collisions alone, about 10th
+    # of the fixture's notes, and under the pool's per-note cap any added note decides it.
     rows = [r for r in load_set(PUBLIC / "set.jsonl").rows
-            if r["expect"]["abstain"] or any(s["store"] == "vault" for s in r["expect"]["sources"])]
+            if r["id"] not in CROSS_SCRIPT
+            and (r["expect"]["abstain"] or any(s["store"] == "vault" for s in r["expect"]["sources"]))]
     gate_set = tmp_path / "gate.evalset.jsonl"
     write_set(rows, gate_set, privacy="public", fixture="eval/public")
     evalset = load_set(gate_set)

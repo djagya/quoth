@@ -5,6 +5,20 @@ the `v*` tags.
 
 ## Unreleased
 
+### Recall
+
+- **The prefetch pool holds at most 1 hit per note before any repeat** (`MAX_HITS_PER_NOTE`),
+  as the served slots already did. Before, a long note whose chunks all match a query filled
+  the 10 candidates a turn judges and the nightly gate scores. On a full real-vault snapshot,
+  dense retrieval: golden-v1 hit@10 0.898 → 0.939 (the 0.14 level), hit@5 0.816 → 0.857, MRR
+  0.606 → 0.620; golden-v3 hit@10 0.926 → 0.944; injected hit rate unchanged. Same-note
+  repeats among injected hits fall from 28 to 4 over both sets, which lowers the
+  injected-precision metric (it counts every chunk of a gold note).
+- Expected change in gate scores: the candidate list is no longer the plain chunk ranking, so
+  a nightly receipt scored before this change and one scored after are not comparable item
+  by item. The first refresh after upgrading compares like with like (both sides are scored
+  by the running code).
+
 ### Fixed
 
 - **The nightly self-check failed on hosts with a model cache outside `$HOME`.** Its

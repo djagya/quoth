@@ -379,7 +379,8 @@ def test_compare_is_data_driven():
 # ------------------------------------------------------------------ parity with the gate metrics
 
 def _gate_metrics(db, evalset, monkeypatch):
-    """The v0.11.0 gate's path: dense search -> evidence_bundle(k=10) -> path metrics (frozen)."""
+    """The v0.11.0 gate's path: dense search -> evidence_bundle(k=10) -> path metrics (frozen),
+    with the serving pool's per-note cap."""
     from quoth.db import connect_read_only
     from quoth.embed.backends import get_embedder
     from quoth.evidence import evidence_bundle
@@ -389,8 +390,10 @@ def _gate_metrics(db, evalset, monkeypatch):
     embedder = get_embedder("hash-ngram")
     conn = connect_read_only(db)
     try:
-        bundles = [evidence_bundle(search(conn, r["question"], k=10, retriever="dense", model="hash-ngram",
-                                          embedder=embedder), k=10)["hits"] for r in evalset.rows]
+        from test_gate_parity import one_per_note
+        bundles = [evidence_bundle(one_per_note(search(conn, r["question"], k=40, retriever="dense",
+                                                       model="hash-ngram", embedder=embedder)), k=10)["hits"]
+                   for r in evalset.rows]
     finally:
         conn.close()
     judged = []

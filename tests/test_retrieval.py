@@ -188,6 +188,16 @@ def test_explicit_bundle_caps_hits_per_note_and_drops_copies(evidence):
     assert len({"PROJECTS/Garden.md", "COPY/Garden copy.md"} & set(_paths(garden))) == 1
 
 
+def test_prefetch_pool_holds_one_hit_per_note_before_repeats(evidence):
+    # The pool a turn judges and the nightly gate scores: a note whose many chunks all match
+    # must not fill it (a long web snapshot once held 9 of 10 candidates on a real vault).
+    out = evidence.bundle("tomatoes basil beds paragraph", 10, "hash-ngram", purpose="prefetch")
+    paths = _paths(out)
+    distinct = len(set(paths))
+    assert len(set(paths[:distinct])) == distinct  # every note once before any repeat
+    assert all(paths.index(p) < distinct for p in paths)
+
+
 def test_vault_pick_serves_one_hit_per_note_before_repeats():
     gate = Gate()
     notes = ["a", "a", "b", "a", "c"]
