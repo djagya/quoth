@@ -775,11 +775,12 @@ def test_the_default_backoff_is_1_5_30_minutes_then_every_30():
     svc = RerankService("hash-rerank", loader=lambda: (_ for _ in ()).throw(OSError("missing")),
                         retry_delays=(0.02, 3600.0))
     assert svc.wait(5) == "unavailable"
+    # attempts counts an attempt when it starts; its retry time is set once it has failed
     for _ in range(200):
-        if svc.status()["attempts"] == 2:
+        status = svc.status()
+        if status["attempts"] == 2 and status["status"] == "unavailable":
             break
         time.sleep(0.01)
-    status = svc.status()
     assert status["attempts"] == 2 and status["retry_in_s"] > 3000  # the last delay repeats
     svc.stop()
     svc._thread.join(2)
