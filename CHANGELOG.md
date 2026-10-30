@@ -3,7 +3,10 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
-## Unreleased
+## 0.17.1 — one hit per note in the prefetch pool, nightly self-check fix
+
+No index change: 0.17.0 snapshots keep serving, no rebuild. Install the release and restart
+the sidecar.
 
 ### Recall
 
