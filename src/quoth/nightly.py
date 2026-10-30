@@ -16,6 +16,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import sys
@@ -216,12 +217,47 @@ def _evaluate_pair(current: Path, candidate: Path, gate_set, private_runner: Pat
         'model': 'bge-m3', 'threads': 2}
 
 
+PROBE_ENV = ('HERMES_HOME',)  # besides every QUOTH_* variable
+
+
+def probe_env() -> dict:
+    """The probe child's environment: the SDK's safe default (PATH, HOME, ...) plus this
+    process's quoth variables, so `quoth mcp` finds the same state and model cache as the
+    nightly run (the SDK passes nothing else through)."""
+    from mcp.client.stdio import get_default_environment
+    env = get_default_environment()
+    env.update({k: v for k, v in os.environ.items() if k.startswith('QUOTH_') or k in PROBE_ENV})
+    env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1])
+    return env
+
+
+_ERROR_CLASS = re.compile(r'\b([A-Z][A-Za-z0-9]*):')
+
+
+def tool_error_class(text: str) -> str:
+    """The first exception class named in a tool error's text (`EmbedderUnavailable: ...`),
+    never the rest: the message can hold host paths, and receipts carry codes only."""
+    m = _ERROR_CLASS.search(text)
+    return m.group(1) if m else 'unknown'
+
+
+def probe_payload(result) -> dict:
+    """The JSON payload of the probe's tool call; a tool error or a non-JSON answer is a
+    `ProbeError` with a path-free code, never a bare JSON decode error."""
+    text = ''.join(c.text for c in result.content if hasattr(c, 'text'))
+    if result.is_error:
+        raise ProbeError('probe_tool_error', tool_error_class(text))
+    try:
+        return json.loads(text)
+    except ValueError:
+        raise ProbeError('probe_not_json', 'unknown') from None
+
+
 async def stdio_probe(pointer: Path, expected_id: str, model='bge-m3'):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
     params = StdioServerParameters(command=sys.executable,
-        args=['-m', 'quoth.cli', 'mcp', '--db', str(pointer)],
-        env={'PYTHONPATH': str(Path(__file__).resolve().parents[1])})
+        args=['-m', 'quoth.cli', 'mcp', '--db', str(pointer)], env=probe_env())
     with tempfile.TemporaryFile(dir=pointer.parent, mode='w+') as errors:
         async with stdio_client(params, errlog=errors) as (read, write):
             async with ClientSession(read, write) as session:
@@ -230,12 +266,20 @@ async def stdio_probe(pointer: Path, expected_id: str, model='bge-m3'):
                     raise ValueError('probe_registry')
                 result = await session.call_tool('evidence_bundle',
                     {'query': 'memory snapshot health check', 'k': 1, 'model': model})
-                payload = json.loads(''.join(c.text for c in result.content if hasattr(c, 'text')))
-                if result.is_error or payload.get('provenance', {}).get('snapshot_id') != expected_id:
+                payload = probe_payload(result)
+                if payload.get('provenance', {}).get('snapshot_id') != expected_id:
                     raise ValueError('probe_snapshot')
                 if not payload.get('hits'):
                     raise ValueError('probe_no_evidence')
     return {'stdio': True, 'snapshot_id': expected_id, 'tools': ['evidence_bundle']}
+
+
+class ProbeError(ValueError):
+    """A failed self-check, with a path-free code and the tool's error class."""
+
+    def __init__(self, code: str, error_class: str):
+        super().__init__(code)
+        self.code, self.error_class = code, error_class
 
 
 def probe(pointer, identity):
@@ -438,6 +482,8 @@ def _run(pointer: Path, vault: Path, staging: Path, receipts: Path, gate_set,
         except (Exception, DeadlineReached) as error:
             receipt['outcome'] = 'INCOMPLETE' if isinstance(error, DeadlineReached) else 'FAIL'
             receipt['reasons'] = ['internal_deadline'] if isinstance(error, DeadlineReached) else [stage + '_failed']
+            if isinstance(error, ProbeError):
+                receipt['self_check_error'] = {'code': error.code, 'class': error.error_class}
             if isinstance(error, ExcessiveDrift):
                 receipt['reasons'] = ['gold_drift_excessive']
                 receipt['gold_drift'] = report_only(error.report)

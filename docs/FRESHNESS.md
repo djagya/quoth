@@ -286,7 +286,10 @@ A run:
    atomically (`rename`, then `fsync` of the directory) only when the gate passes;
 6. opens a fresh stdio MCP client on the pointer and checks the snapshot id and the
    single-tool registry through a real call; on failure it restores the previous pointer,
-   unless someone else changed it meanwhile;
+   unless someone else changed it meanwhile. The `quoth mcp` child gets the run's `QUOTH_*`
+   variables and `HERMES_HOME` (the SDK passes only `PATH`, `HOME` and a few others), and a
+   failed call is recorded as `self_check_error: {code, class}` (`probe_tool_error` with the
+   exception class, or `probe_not_json`), never with the error's text;
 7. after a successful check, deletes older frozen `nightly-*` outputs in staging, keeping the
    current, the previous and the last held candidate;
 8. records the day's serving quality, writes the receipt and the heartbeat.

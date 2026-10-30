@@ -3,6 +3,17 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
+## Unreleased
+
+### Fixed
+
+- **The nightly self-check failed on hosts with a model cache outside `$HOME`.** Its
+  `quoth mcp` child got only the MCP SDK's default environment, so `QUOTH_MODEL_CACHE` and
+  `QUOTH_HOME` were dropped, the tool call failed with `EmbedderUnavailable`, and every switch
+  rolled back (`self_check_failed`). The child now gets every `QUOTH_*` variable and
+  `HERMES_HOME`. A failed probe call is recorded as `self_check_error` (code and exception
+  class, no message text) instead of failing on a JSON decode.
+
 ## 0.17.0 — vault exclusion, freshness per hit, opt-in hybrid retrieval
 
 ### Index format change: rebuild every snapshot
