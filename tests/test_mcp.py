@@ -188,3 +188,38 @@ async def test_serving_pointer_stdio_swap_and_missing_target(db, tmp_path):
             pointer.unlink()
             pointer.symlink_to(tmp_path / 'missing.db')
             assert await identity() == sha(second)
+
+
+def test_probe_child_gets_the_quoth_environment(monkeypatch, tmp_path):
+    # The SDK passes only PATH/HOME/... to the child: without these the probe's `quoth mcp`
+    # looked for models under $HOME and failed every hourly self-check on a real host.
+    from quoth.nightly import probe_env
+    monkeypatch.setenv('QUOTH_MODEL_CACHE', str(tmp_path / 'models'))
+    monkeypatch.setenv('QUOTH_HOME', str(tmp_path / 'state'))
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'hermes'))
+    monkeypatch.setenv('UNRELATED_SECRET', 'x')
+    env = probe_env()
+    assert env['QUOTH_MODEL_CACHE'] == str(tmp_path / 'models')
+    assert env['QUOTH_HOME'] == str(tmp_path / 'state') and env['HERMES_HOME'] == str(tmp_path / 'hermes')
+    assert 'UNRELATED_SECRET' not in env and 'PATH' in env and env['PYTHONPATH']
+
+
+def test_probe_reports_a_tool_error_by_class_only():
+    # A tool error used to reach json.loads and fail as a bare decode error.
+    from types import SimpleNamespace as NS
+    from quoth.nightly import ProbeError, probe_payload
+    err = NS(is_error=True, content=[NS(text='Error executing tool evidence_bundle: '
+                                             'EmbedderUnavailable: files not found under /opt/x')])
+    with pytest.raises(ProbeError) as raised:
+        probe_payload(err)
+    assert (raised.value.code, raised.value.error_class) == ('probe_tool_error', 'EmbedderUnavailable')
+    assert '/opt' not in str(raised.value)
+    with pytest.raises(ProbeError, match='probe_not_json'):
+        probe_payload(NS(is_error=False, content=[NS(text='not json')]))
+    assert probe_payload(NS(is_error=False, content=[NS(text='{"hits": []}')])) == {'hits': []}
+
+
+def test_tool_error_class_never_keeps_the_message():
+    from quoth.nightly import tool_error_class
+    assert tool_error_class('EmbedderUnavailable: files not found under /opt/x') == 'EmbedderUnavailable'
+    assert tool_error_class('/opt/x not found') == 'unknown'

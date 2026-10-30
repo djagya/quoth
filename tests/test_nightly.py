@@ -100,6 +100,15 @@ def test_failed_probe_rolls_back_no_retention(tmp_path):
     assert 'private sentinel' not in Path(r['receipt']).read_text()
 
 
+def test_a_probe_tool_error_names_its_class_in_the_receipt(tmp_path):
+    def fail(*a):
+        raise nightly.ProbeError('probe_tool_error', 'EmbedderUnavailable')
+    r, src, pointer = run(tmp_path, self_check=fail)
+    assert r['outcome'] == 'FAIL' and r['rollback'] == 'restored_previous'
+    assert r['reasons'] == ['self_check_failed']
+    assert r['self_check_error'] == {'code': 'probe_tool_error', 'class': 'EmbedderUnavailable'}
+
+
 def test_disk_shortage_and_failure_receipt(tmp_path, monkeypatch):
     monkeypatch.setattr(nightly.shutil, 'disk_usage', lambda *a: SimpleNamespace(free=0))
     r, src, pointer = run(tmp_path)
