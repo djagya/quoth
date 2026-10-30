@@ -191,8 +191,9 @@ against it.
    and attachment captions are stripped, injected turns (scheduled deliveries, notices)
    skip recall entirely, and the text is capped at 1,000 characters. It is embedded once
    per turn: the lanes, the vault search and the claim index share one query vector.
-2. **Candidates.** Each store ranks a pool: the 10 best vault hits (hybrid retrieval, below;
-   notes of the explicit recall tier are never candidates); up to 12
+2. **Candidates.** Each store ranks a pool: the 10 best vault hits, at most 1 per note before
+   any repeat (vault retrieval, below; notes of the explicit recall tier are never
+   candidates); up to 12
    accepted, current claims by meaning (BGE-M3 cosine ≥ 0.5 over an in-memory index of
    accepted claims), then up to 12 by words that the meaning pass missed. A word match needs
    at least one content word of the query (function words of en, ru, pt and de dropped,
@@ -239,7 +240,10 @@ query names. `--retrieval dense` ranks by cosine alone (the 0.16 behaviour), for
 - **Copies are dropped**: a hit whose normalized text (casefolded words) repeats an earlier
   hit's, at any path, is left out.
 - **Per-note cap**: an explicit bundle returns at most 2 hits of one note before any repeat
-  (`MAX_HITS_PER_NOTE`); prefetch applies its cap of 1 to the served slots.
+  (`MAX_HITS_PER_NOTE`); prefetch applies its cap of 1 to the pool itself and again to the
+  served slots. Without it, a long note whose chunks all match a query (a long web snapshot,
+  a dated record) filled the pool, so a turn judged, and the nightly gate scored, 2 or 3
+  notes instead of 10.
 
 ### Recall tiers
 
