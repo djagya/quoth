@@ -10,11 +10,14 @@ A frozen snapshot is a SQLite database plus a sibling `<name>.manifest.json`, bo
 and never written again. The manifest records:
 
 - the database's SHA-256 and size, `status: frozen_current_vault_candidate`, integrity and
-  schema checks, the vault root;
+  schema checks, the vault root, and `built_at` (UTC, ISO-8601, when the build froze: the
+  "vault indexed as of" time);
+- `ignore_rules_sha256`: the SHA-256 of the vault's `.quothignore` at build time (`null`
+  when there is none);
 - the model (`BAAI/bge-m3`) and the SHA-256 of `eval/models-manifest.json`;
 - `code_digests`: SHA-256 of every file that shapes the stored data (`chunker.py`, `db.py`,
-  `dense.py`, `embed/backends.py`, `embed/store.py`, `entities.py`, `ingest.py`,
-  `scopes.py`, `scopes.toml`, `search.py`) and of every evidence-DB migration;
+  `dense.py`, `embed/backends.py`, `embed/store.py`, `entities.py`, `ingest.py`, `links.py`,
+  `scopes.py`, `scopes.toml`, `search.py`, `vault.py`) and of every evidence-DB migration;
   `index_code_digests` (the same minus `search.py`, plus `refresh.py` and `freshness.py`);
   `serving_code_digests` (`search.py`);
 - counts and an inventory digest of the current note paths and hashes.
@@ -28,8 +31,8 @@ may not match what the current code would produce, so it is never silently reuse
 | `--allow-scope-contract-change` (`refresh`) | `scopes.py`, `scopes.toml` | you changed the ingest scope rules on purpose |
 | `--allow-index-contract-rebase` (`refresh`, `successor`, `refresh-nightly`) | `embed/store.py`, `refresh.py`, `freshness.py` | the change does not alter stored chunks or vectors |
 
-Changes to chunking or the embedder input (`chunker.py`), ingest, schema, entities or the
-embedder are never covered; rebuild instead. Never set either flag in a scheduled job: once
+Changes to chunking or the embedder input (`chunker.py`), ingest, exclusion rules
+(`vault.py`), links (`links.py`), schema, entities or the embedder are never covered; rebuild instead. Never set either flag in a scheduled job: once
 one successor built across the change is serving, normal runs continue without it.
 
 ### Rebuilding across an index change
@@ -50,11 +53,97 @@ A release that changes the evidence schema cannot open older snapshots at all, s
    sidecar on the new release before the next `refresh-nightly` run. Keep the old snapshot and
    the old release together as the rollback pair.
 
+## What a snapshot holds
+
+### Exclusion
+
+There is one exclusion path (`vault.py`), used by ingest and by the freshness inventory
+alike. A Markdown note is indexed unless:
+
+- a **built-in rule** excludes it: a hidden name (a leading `.`) anywhere on its path, or a
+  folder named in `exclude_dirs` in `scopes.toml` (`ASSISTANT`, attachment folders);
+- the vault's **`.quothignore`** ignores it or a folder above it;
+- its **frontmatter** says `quoth: exclude`.
+
+`.quothignore` sits at the vault root and uses gitignore syntax: `#` comments, `!` negation
+(the last matching rule wins), a trailing `/` for folders only, `*`, `?`, `[...]`, `**`, and
+anchoring (a pattern with a `/` anywhere but at its end matches from the vault root; one
+without matches at any depth). As in git, a note inside an ignored folder cannot be
+re-included, and matching is case-sensitive. Its rules add to the built-in ones and cannot
+re-include what those exclude.
+
+```gitignore
+# keep these out of quoth entirely
+Health/
+/Journal/*
+!/Journal/Reading list.md
+*.private.md
+```
+
+An excluded note is never chunked, embedded or stored. **Excluded means purged:** when a
+note that was indexed becomes excluded, the next build deletes all of its rows, current and
+historical (source, versions, chunks, vectors, entities, lexical-index rows and links), merges
+the lexical indexes, and the freeze `VACUUM` rewrites the file, so its text is not left in
+free pages either (`ingest.purged` in the manifest counts these notes). A note that is merely
+deleted from the vault keeps its retired history, as before. A snapshot that holds any row
+under a built-in exclusion is `invalid`.
+
+**Rollback re-exposes excluded material.** An older snapshot still holds whatever it held
+when it was built. Pointing serving back at it brings back notes you have since excluded;
+delete older snapshots (and bundles made from them) that hold such notes.
+
+Changing `.quothignore` (adding, editing or removing it) makes the snapshot `stale`
+(`ignore_rules_changed`), even when no indexed note changes; the successor records the new
+digest.
+
+### Links
+
+The `links` table holds every link from a current chunk to another note: wikilinks
+`[[Target]]`, `[[Target|alias]]`, `[[Target#Heading]]`, embeds `![[...]]` and relative
+Markdown links `[text](path.md)` (frontmatter, fenced and inline code excluded).
+
+| Column | Meaning |
+|---|---|
+| `chunk_id` | the linking chunk (a link in an overlap appears in both chunks) |
+| `target` | the target as written, without `#heading` and alias |
+| `heading` | the `#heading` (or `#^block`) part, or NULL |
+| `line` | 1-based line in the linking note |
+| `kind` | `wikilink`, `embed` or `markdown` |
+| `status` | `resolved`, `missing`, `ambiguous` or `excluded` |
+| `target_path` | the vault-relative path of the target note; set only when `resolved` |
+
+Resolution follows Obsidian: an exact vault path (with or without `.md`, relative to the
+linking note for `./`, `../` and Markdown links; case-insensitive when unique), else a unique
+match on the path's tail (`[[Note]]`, `[[Sub/Note]]`). Several matches give `ambiguous`; a
+target that is an excluded note gives `excluded`, and its path is never stored (excluded
+notes still take part in matching, so a link to one never resolves to another note of the
+same name). Every current link is resolved again on each build, so links follow notes as
+they are added, renamed or removed. In a scoped bundle, a link to a note outside the scope
+becomes `excluded` too.
+
+### Facts for "changed since indexing"
+
+Each current version (`source_versions`, with `sources.path`) records `content_hash` (the
+SHA-256 of the file bytes that were indexed), `mtime_ns` and `size_bytes` (the file's stat
+when it was read, kept current while the content is unchanged). A reader can compare them
+with the live file to say a note changed after the snapshot was built.
+
+### Recall tiers
+
+Each scope declared in `scopes.toml` has `recall = "auto"` (the default) or `"explicit"`.
+Both are indexed the same way; the tier only tells the serving side whether the scope's notes
+may appear in automatic recall (`quoth.scopes.recall_tier(scope)`,
+`quoth.scopes.explicit_scopes()`). The package ships `general` and `work` as `auto` and
+`private` as `explicit`; a `[[rule]]` maps folders to a scope.
+
 ## Building a snapshot: `quoth refresh`
 
 Build the first snapshot from scratch with `quoth snapshot`. It ingests and embeds the vault
 into a new file and writes the same manifest a refresh writes (with `source_db_sha256: null`),
-so the result can be served and used as the source of every later refresh:
+so the result can be served and used as the source of every later refresh. A killed build
+leaves its checkpoint and every committed batch: rerun with the same `--target`, `--vault`
+and `--resume` to embed only what is missing. The checkpoint must name this target and vault
+and match the current code and model digests; otherwise start a new target:
 
 ```sh
 quoth snapshot --vault /abs/vault --target /abs/snapshots/first.db
@@ -64,6 +153,7 @@ quoth snapshot --vault /abs/vault --target /abs/snapshots/first.db
 |---|---|---|
 | `--target PATH` | required | the new snapshot; must not exist yet |
 | `--vault DIR` | required | the vault to index |
+| `--resume` | off | continue this exact interrupted build from `<target>.checkpoint.json` |
 | `--retries N` | 2 | embedding retries when the vault changes during the build |
 | `--threads N`, `--batch-size N` | 4, 32 | embedding settings |
 
@@ -97,7 +187,7 @@ as JSON.
   raises peak memory.
 - **Retired vectors.** Vectors of non-current versions are deleted and the database is
   vacuumed before freezing (`pruned_retired_vectors`). Sources, versions and chunks are never
-  deleted.
+  deleted, except those of a note that became excluded (above).
 - **Resume.** After an interruption, rerun with the same `--source`, `--target`, `--vault` and
   `--resume`. An interruption before the target database exists cannot be resumed: pick a new
   target.
@@ -118,13 +208,13 @@ writes nothing. Repeated checks against unchanged inputs give byte-identical out
 | State | Exit | Meaning |
 |---|---|---|
 | `fresh` | 0 | the vault's current allowed paths and hashes equal the snapshot's |
-| `stale` | 3 | a valid, compatible snapshot; `delta` gives added, removed and changed counts |
+| `stale` | 3 | a valid, compatible snapshot; `delta` gives added, removed and changed counts; reasons `inventory_changed` and/or `ignore_rules_changed` |
 | `incompatible` | 4 | code, scope, model or vault contract differs; no automatic migration |
-| `invalid` | 5 | unreadable or corrupt snapshot, incomplete vectors, current `ASSISTANT/` content, inconsistent manifest, or vault drift during the check |
+| `invalid` | 5 | unreadable or corrupt snapshot, incomplete vectors, any row (current or historical) under a built-in exclusion such as `ASSISTANT/`, inconsistent manifest, or vault drift during the check |
 
 Exit 1 is a runtime failure and 2 a usage error. The checks cover the database digest and
 size, schema, integrity, foreign keys, `query_only`, manifest counts and inventory digest, full
-current BGE-M3 coverage, and zero current `ASSISTANT/` sources, chunks or vectors. The model
+current BGE-M3 coverage, and no source, current or historical, under a built-in exclusion. The model
 manifest is compared as a contract; model files are not loaded. A check hashes the whole
 database and scans the vault twice, so do not poll it at high frequency.
 

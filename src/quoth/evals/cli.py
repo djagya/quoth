@@ -16,6 +16,8 @@ from .format import EvalSetError
 
 PRIVATE_WARNING = ("warning: --detail-out holds per-row ids, locators and vault paths of this set; "
                    "it is private data: keep it on this machine, never commit or share it")
+TRACE_WARNING = ("warning: --trace-out holds every question, recall block and excerpt of this run; "
+                 "it is private data: keep it on this machine, never commit or share it")
 
 
 def _print(obj) -> None:
@@ -51,8 +53,8 @@ def _target(a):
     gate = relevance.from_args(a)
     reranker = rerank.from_args(a, gate)
     if a.socket:
-        if gate != relevance.default_gate() or reranker is not None:
-            raise RunError("gate and rerank flags apply in-process only; a live sidecar uses its own"
+        if gate != relevance.default_gate() or reranker is not None or a.retrieval != D.RETRIEVAL or a.vault:
+            raise RunError("gate, rerank, retrieval and vault flags apply in-process only; a live sidecar uses its own"
                            " (see /v1/health)")
         target = SocketTarget(a.socket, evidence_budget=30.0 if a.evidence_budget is None else a.evidence_budget)
         target.db = a.db  # read-only, only for --gold-drift against the served snapshot
@@ -73,7 +75,43 @@ def _target(a):
         owner_episodes=a.owner_episodes, model=a.model, evidence_budget=a.evidence_budget,
         episodes_prefetch=a.episodes_prefetch == "on", owner_prefetch=a.owner_prefetch == "on",
         assistant_min_score=a.assistant_min_score, owner_min_score=a.owner_min_score, gate=gate,
-        reranker=reranker)
+        reranker=reranker, retrieval=a.retrieval, vault=a.vault)
+
+
+ORACLE_WARNING = ("warning: the oracle join holds each row's trace and its oracle source text; "
+                  "it is private data: keep it on this machine, never commit or share it")
+
+
+def _read_oracle(path) -> dict:
+    """{row id: oracle} from a JSONL of `{"id", "oracle"}` rows (oracle: any JSON, usually
+    the source text a row's answer rests on, e.g. [{"locator", "text"}])."""
+    out = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict) or not isinstance(row.get("id"), str) or "oracle" not in row:
+                raise ValueError("oracle rows need a string id and an oracle")
+            if row["id"] in out:
+                raise ValueError("duplicate oracle id")
+            out[row["id"]] = row["oracle"]
+    return out
+
+
+def _write_oracle_join(a, trace: list, oracle: dict) -> None:
+    """The trace lines with their oracle, a separate private file (never the trace itself)."""
+    target = Path(a.oracle_out) if a.oracle_out else Path(a.trace_out).with_suffix(".oracle.jsonl")
+    if target.resolve() == Path(a.trace_out).resolve():
+        target = Path(str(a.trace_out) + ".oracle.jsonl")
+    ids = {t["id"] for t in trace}
+    lines = [{**t, "oracle": oracle.get(t["id"]), "oracle_found": t["id"] in oracle} for t in trace]
+    print(ORACLE_WARNING, file=sys.stderr)
+    print(f"oracle join: {sum(t['id'] in oracle for t in trace)}/{len(trace)} rows matched,"
+          f" {len(set(oracle) - ids)} oracle ids not in the run", file=sys.stderr)
+    target.touch(mode=0o600)
+    target.chmod(0o600)
+    target.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in lines), encoding="utf-8")
 
 
 def _cmd_run(a) -> int:
@@ -89,9 +127,20 @@ def _cmd_run(a) -> int:
     except (RunError, OSError, ValueError, RuntimeError) as exc:
         _err(f"cannot build target: {type(exc).__name__}: {exc}")
         return 2
+    oracle = None
+    if a.oracle:
+        if not a.trace_out:
+            _err("--oracle needs --trace-out")
+            return 2
+        try:
+            oracle = _read_oracle(a.oracle)
+        except (OSError, ValueError) as exc:
+            _err(f"invalid oracle file: {type(exc).__name__}")
+            return 2
+    trace = [] if a.trace_out else None
     try:
         receipt, detail = run_set(evalset, target, k_candidates=a.k_candidates,
-                                  gold_drift=a.gold_drift, detail=bool(a.detail_out))
+                                  gold_drift=a.gold_drift, detail=bool(a.detail_out), trace=trace)
     except RunError as exc:
         _err(str(exc))
         return 2
@@ -104,6 +153,14 @@ def _cmd_run(a) -> int:
         out = Path(a.detail_out)
         out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in detail), encoding="utf-8")
         out.chmod(0o600)
+    if a.trace_out:
+        print(TRACE_WARNING, file=sys.stderr)
+        out = Path(a.trace_out)
+        out.touch(mode=0o600)
+        out.chmod(0o600)
+        out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in trace), encoding="utf-8")
+    if oracle is not None:
+        _write_oracle_join(a, trace, oracle)
     if not a.quiet:
         print(receipt.to_json(), end="")
     return 3 if receipt.status != "ok" else 0
@@ -163,7 +220,15 @@ def _cmd_online(a) -> int:
     if not Path(a.log).is_dir():
         _err("log directory not found")
         return 2
-    _print(online(a.log, a.days))
+    from .online import _when
+    for name in ("since", "until"):
+        if getattr(a, name) is not None and _when(getattr(a, name)) is None:
+            _err(f"--{name} is not an ISO-8601 time")
+            return 2
+    if a.max_turns is not None and a.max_turns < 1:
+        _err("--max-turns must be at least 1")
+        return 2
+    _print(online(a.log, a.days, since=a.since, until=a.until, max_turns=a.max_turns))
     return 0
 
 
@@ -219,6 +284,15 @@ def main(argv=None) -> int:
                     help="resolve expected vault paths against the snapshot (nightly gate rules)")
     pr.add_argument("--out", help="write the receipt here")
     pr.add_argument("--detail-out", help="PRIVATE per-row ids/locators/scores (local only)")
+    pr.add_argument("--trace-out", help="PRIVATE JSONL per row: query, exact recall block, explicit hits"
+                                        " with text (caller tests; local only)")
+    pr.add_argument("--oracle", help="PRIVATE JSONL of {id, oracle} rows (the source text a row's answer"
+                                     " rests on): joined to --trace-out by row id into a separate file")
+    pr.add_argument("--oracle-out", help="where the oracle join goes (default: TRACE.oracle.jsonl)")
+    pr.add_argument("--retrieval", choices=D.RETRIEVAL_MODES, default=D.RETRIEVAL,
+                    help=f"vault ranking, as the sidecar's --retrieval (default {D.RETRIEVAL})")
+    pr.add_argument("--vault", help="live vault root: per-hit freshness (live) in explicit hits, as the"
+                                    " sidecar's --vault")
     pr.add_argument("--quiet", action="store_true", help="do not print the receipt")
     from .. import relevance, rerank
     relevance.add_arguments(pr)
@@ -260,6 +334,10 @@ def main(argv=None) -> int:
     po = sub.add_parser("online", help="aggregate readout of the sidecar's --prefetch-log")
     po.add_argument("--log", required=True)
     po.add_argument("--days", type=int, default=None)
+    po.add_argument("--since", default=None, help="window start, ISO-8601 (UTC when no zone)")
+    po.add_argument("--until", default=None, help="window end (exclusive), ISO-8601")
+    po.add_argument("--max-turns", type=int, default=None,
+                    help="the window is the first N authored prefetch turns (from --since)")
     po.set_defaults(func=_cmd_online)
 
     pf = sub.add_parser("fixture", help="build a fixture's stores (snapshot, ledger, state.db, lanes)")

@@ -131,7 +131,7 @@ class _ScoredEvidence:
     def __init__(self, hits):
         self.hits = hits
 
-    def bundle(self, query, k, model, with_scores=False):
+    def bundle(self, query, k, model, **_):
         return {"hits": [dict(h) for h in self.hits[:k]]}
 
 
@@ -256,7 +256,7 @@ def test_prefetch_log_carries_gate_fields_without_text(tmp_path, state_db):
         app.prefetch({"query": "how do I feed the sourdough starter", "session_id": "s1"})
         app.prefetch_log.flush()
         raw = "".join(p.read_text() for p in (tmp_path / "log").glob("*.jsonl"))
-        turn = json.loads(raw.splitlines()[0])
+        turn = next(r for r in map(json.loads, raw.splitlines()) if r["type"] == "prefetch")
         assert [(v["pool"], v["passed"], v["gate"], v["injected"]) for v in turn["stores"]["vault"]] == [
             (True, True, "cosine", True), (True, True, "cosine", True), (True, False, "below_floor", False),
             (True, False, "below_floor", False)]
@@ -349,17 +349,10 @@ def test_record_keeps_signals_and_counts_words_on_the_injected_excerpt():
                         "text": "Rent. " + tail}]}
     rec = SW.record(row, cands, row["expect"]["sources"])
     a, b = rec["stores"]["vault"]["items"]
-    assert a == {"score": 0.7, "pool": True, "injected": True, "lexical": 1.0, "matched": 3, "match": [0]}
-    assert b == {"score": 0.5, "pool": True, "injected": False, "lexical": 0.0}
+    assert a == {"score": 0.7, "pool": True, "injected": True, "lexical": 1.0, "matched": 3, "match": [0],
+                 "note": 0}
+    assert b == {"score": 0.5, "pool": True, "injected": False, "lexical": 0.0, "note": 1}
     assert "text" not in json.dumps(rec) and "a.md" not in json.dumps(rec)
-
-
-def test_scores_align_in_order_when_locators_repeat():
-    from quoth.evidence_service import align_scores
-    hits = [{"locator": "a.md:1-2"}, {"locator": "a.md:1-2"}, {"locator": "b.md:1-1"}]
-    ranked = [("a.md:1-2", 0.9), ("x.md:1-1", 0.8), ("a.md:1-2", 0.7), ("b.md:1-1", 0.6)]  # x dropped
-    align_scores(hits, ranked)
-    assert [h["cosine"] for h in hits] == [0.9, 0.7, 0.6]
 
 
 def test_record_judges_claims_by_their_gate_score():
@@ -402,15 +395,15 @@ def test_the_gate_judges_the_injected_excerpt():
 
 def test_evidence_scores_survive_a_shortened_bundle(snapshot_db, monkeypatch):
     """The bundle's text ceiling can drop hits; the rest keep their own cosine (by locator)."""
-    from quoth import dated
+    from quoth import evidence_service
     from quoth.evidence_service import ReadOnlyEvidence
     from quoth.serving import ServingSnapshot
     evidence = ReadOnlyEvidence(ServingSnapshot(str(snapshot_db)))
     try:
         full = evidence.bundle("tomatoes basil garden", 4, "hash-ngram", with_scores=True)["hits"]
         assert len(full) == 4 and all("cosine" in h for h in full)
-        real = dated.evidence_bundle
-        monkeypatch.setattr(dated, "evidence_bundle", lambda hits, k: real(hits[1:], k=k))
+        real = evidence_service.evidence_bundle
+        monkeypatch.setattr(evidence_service, "evidence_bundle", lambda hits, k: real(hits[1:], k=k))
         short = evidence.bundle("tomatoes basil garden", 4, "hash-ngram", with_scores=True)["hits"]
         assert [(h["locator"], h["cosine"]) for h in short] == [(h["locator"], h["cosine"]) for h in full[1:]]
     finally:

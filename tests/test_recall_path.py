@@ -157,7 +157,7 @@ class _Hits:
     def __init__(self, hits):
         self.hits = hits
 
-    def bundle(self, query, k, model, with_scores=False):
+    def bundle(self, query, k, model, **_):
         return {"hits": [dict(h) for h in self.hits[:k]]}
 
 

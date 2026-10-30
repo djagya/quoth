@@ -36,6 +36,9 @@ class ConnState:
         self.vectors_ok: set[str] = set()
         self._matrices: dict = {}
         self._dates = None
+        self._catalog = None
+        self._masks: dict = {}
+        self._names = None
 
     def matrix(self, model: str):
         """(ids, mat) of all current vectors for `model`: dense._matrix with scopes=()."""
@@ -48,6 +51,53 @@ class ConnState:
         if self._dates is None:
             self._dates = date_index(self.conn)
         return self._dates
+
+    def catalog(self) -> "Catalog":
+        """Where each current chunk lives (note path, scope), for pre-filters and diversity."""
+        if self._catalog is None:
+            self._catalog = Catalog(self.conn)
+        return self._catalog
+
+    def mask(self, model: str, filt) -> np.ndarray | None:
+        """Boolean mask over `matrix(model)` rows that `filt` (`retrieval.Filter`) allows;
+        None when it allows every row. Cached per filter."""
+        if not filt:
+            return None
+        key = (model, filt)
+        hit = self._masks.get(key)
+        if hit is None:
+            ids, _ = self.matrix(model)
+            cat = self.catalog()
+            hit = np.fromiter((filt.allows(*cat.where(int(cid))) for cid in ids), dtype=bool, count=ids.size)
+            if len(self._masks) >= 32:
+                self._masks.pop(next(iter(self._masks)))
+            self._masks[key] = hit
+        return hit
+
+    def names(self) -> dict:
+        """{folded note name: paths}: titles, aliases and paths a query can name
+        (`retrieval.note_names`)."""
+        if self._names is None:
+            from .retrieval import note_names
+            self._names = note_names(self.conn)
+        return self._names
+
+
+class Catalog:
+    """chunk id -> (path, scope), and each note's chunk ids, of the current versions."""
+
+    def __init__(self, conn):
+        self.by_chunk: dict[int, tuple[str, str]] = {}
+        self.by_path: dict[str, list[int]] = {}
+        for cid, path, scope in conn.execute(
+                "SELECT c.id, s.path, s.scope FROM chunks c"
+                " JOIN source_versions v ON v.id = c.source_version_id AND v.is_current = 1"
+                " JOIN sources s ON s.id = v.source_id ORDER BY c.id"):
+            self.by_chunk[cid] = (path, scope)
+            self.by_path.setdefault(path, []).append(cid)
+
+    def where(self, chunk_id: int) -> tuple[str, str]:
+        return self.by_chunk.get(chunk_id, ("", ""))
 
 
 def state(conn) -> ConnState:
@@ -71,11 +121,20 @@ def rank(ids: np.ndarray, mat: np.ndarray, q: np.ndarray, limit: int) -> list[tu
     """dense.dense_topk's scoring and tie-break on a preloaded matrix."""
     if ids.size == 0:
         return []
-    sims = mat @ q
-    n = min(limit, sims.shape[0])
-    top = np.argpartition(-sims, n - 1)[:n]
-    top = top[np.lexsort((ids[top], -sims[top]))]
-    return [(int(ids[i]), float(sims[i])) for i in top]
+    return top(ids, mat @ q, limit)
+
+
+def top(ids: np.ndarray, sims: np.ndarray, limit: int, mask: np.ndarray | None = None) -> list[tuple[int, float]]:
+    """The `limit` best (chunk id, cosine) of `sims`, ties by chunk id; rows outside `mask`
+    are never candidates (a pre-filter, not a post-filter)."""
+    rows = np.arange(sims.shape[0]) if mask is None else np.flatnonzero(mask)
+    if rows.size == 0 or limit <= 0:
+        return []
+    sub = sims[rows]
+    n = min(limit, sub.shape[0])
+    best = np.argpartition(-sub, n - 1)[:n]
+    best = rows[best[np.lexsort((ids[rows[best]], -sub[best]))]]
+    return [(int(ids[i]), float(sims[i])) for i in best]
 
 
 class QueryEmbedder:

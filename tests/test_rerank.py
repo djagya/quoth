@@ -305,9 +305,22 @@ def test_prefetch_log_carries_rerank_scores_without_text(tmp_path, state_db):
         app.prefetch({"query": QUERY, "session_id": "s1"})
         app.prefetch_log.flush()
         raw = "".join(p.read_text() for p in (tmp_path / "log").glob("*.jsonl"))
-        turn = json.loads(raw.splitlines()[0])
+        recs = [json.loads(line) for line in raw.splitlines()]
+        turn = next(r for r in recs if r["type"] == "prefetch")
         assert [v["rerank"] for v in turn["stores"]["vault"]] == [0.93, 0.04, 0.61, None]
         assert turn["status"]["rerank"] == "ok" and "sourdough" not in raw
+        # The turn's decision reranks: its job's counterfactual is `unknown`, never cosine-only.
+        app.wait_idle()
+        for _ in range(100):
+            app.prefetch_log.flush()
+            raw = "".join(p.read_text() for p in (tmp_path / "log").glob("*.jsonl"))
+            done = [r for r in map(json.loads, raw.splitlines()) if r["type"] == "done"]
+            if done:
+                break
+            time.sleep(0.02)
+        (done,) = done
+        assert done["decision"] == "unknown" and done["would_inject"] is None
+        assert done["unknown_reason"] == "rerank_not_computed" and done["raw_n"] == 4
     finally:
         app.close()
 

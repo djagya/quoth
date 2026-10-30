@@ -51,7 +51,7 @@ BUNDLE_FORMAT = "quoth-bundle/1"
 SUPPORTED_FORMATS = frozenset({BUNDLE_FORMAT})
 
 #: Logical data tables in insert (dependency) order.
-CONTENT_TABLES = ("sources", "source_versions", "chunks", "entities", "embeddings")
+CONTENT_TABLES = ("sources", "source_versions", "chunks", "entities", "embeddings", "links")
 #: Rebuilt from the selected current chunks; never copied row-for-row.
 DERIVED_TABLES = ("chunks_fts", "chunks_fts_trigram")
 
@@ -77,6 +77,7 @@ _SCOPED_PREDICATES = {
     "chunks": "source_version_id IN (SELECT id FROM main.source_versions)",
     "entities": "chunk_id IN (SELECT id FROM main.chunks)",
     "embeddings": "chunk_id IN (SELECT id FROM main.chunks)",
+    "links": "chunk_id IN (SELECT id FROM main.chunks)",
 }
 
 
@@ -415,6 +416,11 @@ def _build_bundle(target_work: Path, snapshot: Path, scope: str | None) -> dict:
                                         "kept": cur.rowcount}
         finally:
             conn.execute("DETACH DATABASE srcsnap")
+        if scope is not None:
+            # A link to a note outside the scope must not name it: not available here.
+            conn.execute("UPDATE links SET status = 'excluded', target_path = NULL"
+                         " WHERE target_path IS NOT NULL"
+                         " AND target_path NOT IN (SELECT path FROM sources)")
         _rebuild_fts(conn)
         # Physical compaction: excluded content was never written; VACUUM also
         # guarantees no residual free-list pages from the build itself.

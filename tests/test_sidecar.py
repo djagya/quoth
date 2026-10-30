@@ -516,7 +516,7 @@ def test_prefetch_log_records_turns_and_tool_calls_without_text(provider, served
     assert len(files) == 1 and oct(files[0].stat().st_mode & 0o777) == "0o600"
     raw = files[0].read_text()
     assert "tomatoes" not in raw and "basil" not in raw and "tg1" not in raw
-    turn, tool = [json.loads(line) for line in raw.splitlines()]
+    turn, tool = [r for r in map(json.loads, raw.splitlines()) if r["type"] in ("prefetch", "tool")]
     assert turn["type"] == "prefetch" and turn["session"] == session_hash("tg1")
     assert turn["query_len"] == len(query) and len(turn["query_sha256"]) == 64
     assert set(turn["stores"]) >= {"claims", "vault"} and turn["status"]["vault"] == "ok"
@@ -666,7 +666,7 @@ def test_injected_turn_skips_prefetch_and_is_logged(tmp_path, state_db):
         assert out["evidence_status"] == "skipped" and slow.calls == 0
         plog.flush()
         records = [json.loads(line) for f in (tmp_path / "log").glob("*.jsonl") for line in f.open()]
-        assert [r["type"] for r in records] == ["skip"]
+        assert [r["type"] for r in records if r["type"] != "instance"] == ["skip"]
     finally:
         slow.release.set()
         app.close()

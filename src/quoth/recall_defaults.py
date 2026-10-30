@@ -38,6 +38,27 @@ CLAIM_POOL = 12           # claims per path (meaning, words) a turn retrieves an
 MAX_CANDIDATES = 20       # deepest list per store (dry runs, the evidence bundle's k)
 MAX_WIDEN = 20            # most vault hits a rerank widen may score (= MAX_CANDIDATES)
 
+# ---------------------------------------------------------------- retrieval (`quoth.retrieval`)
+
+# How vault hits are ranked, for prefetch and for `evidence_bundle` alike: "hybrid" fuses the
+# dense list (bge-m3 cosine) with the snapshot's BM25 (unicode61) and trigram lists and the
+# notes the query names, by reciprocal rank (RRF); "dense" ranks by cosine alone.
+# Dense is the default: on the golden sets equal-weight RRF lets the three keyword lists
+# outvote the dense list (golden-v1 hit@10 0.47 hybrid vs 0.90 dense), so hybrid stays
+# opt-in until its fusion is reweighted and measured.
+RETRIEVAL = "dense"
+RETRIEVAL_MODES = ("hybrid", "dense")
+HYBRID_DEPTH = 50         # entries per list (dense, bm25, trigram, named) fused by RRF
+EVIDENCE_K = 10           # `evidence_bundle` hits when the caller gives no k
+# Hits from one note before any repeat: a turn's served slots, and an explicit bundle.
+MAX_HITS_PER_NOTE = {"prefetch": 1, "explicit": 2}
+MAX_LINKS = 5             # linked notes listed per hit
+# Per-hit freshness against the live vault (`quoth.live`): at most this many stats and
+# hashes per call, and only files up to LIVE_HASH_MAX_BYTES are hashed.
+LIVE_MAX_STATS = 10
+LIVE_MAX_HASHES = 3
+LIVE_HASH_MAX_BYTES = 256 * 1024
+
 # ---------------------------------------------------------------- floors (bge-m3 cosine)
 
 CLAIM_INDEX_MIN_SIMILARITY = 0.5  # a claim counts as a meaning match at or above this

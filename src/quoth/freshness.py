@@ -16,6 +16,7 @@ from .assets import eval_path
 from .db import connect_read_only
 from .refresh import code_digests, db_inventory, inventory, refresh, sha, validate, validate_code_compatibility
 from .scopes import load_config
+from .vault import IgnoreRules, ignore_rules_sha256, path_excluded
 
 
 def digest(value: dict) -> str:
@@ -63,14 +64,12 @@ def _snapshot(db: Path, vault: Path, allow_index_contract_rebase: bool = False) 
              "invalid", "unfrozen_sidecar")
     with closing(connect_read_only(db)) as conn:
         _require(conn.execute("PRAGMA query_only").fetchone()[0] == 1, "invalid", "query_only")
-        excluded = conn.execute(
-            "SELECT count(DISTINCT s.id), count(DISTINCT c.id), count(e.chunk_id) "
-            "FROM sources s JOIN source_versions v ON v.source_id=s.id AND v.is_current=1 "
-            "LEFT JOIN chunks c ON c.source_version_id=v.id "
-            "LEFT JOIN embeddings e ON e.chunk_id=c.id "
-            "WHERE s.path='ASSISTANT' OR s.path GLOB 'ASSISTANT/*'"
-        ).fetchone()
-        _require(not any(excluded), "invalid", "excluded_current_evidence")
+        # No row of a note under a built-in exclusion, current or historical: excluded
+        # means purged. (`.quothignore` changes make a snapshot stale, not invalid.)
+        builtin = IgnoreRules()
+        _require(not any(path_excluded(row[0], builtin)
+                         for row in conn.execute("SELECT path FROM sources")),
+                 "invalid", "excluded_current_evidence")
         counts = validate(conn)
         stored = db_inventory(conn)
         _require(counts == manifest.get("counts"), "invalid", "manifest_counts")
@@ -82,7 +81,8 @@ def _snapshot(db: Path, vault: Path, allow_index_contract_rebase: bool = False) 
                 "inventory_sha256": digest(stored), "counts": counts,
                 "integrity": "ok", "query_only": True,
                 "excluded_current_sources": 0, "excluded_current_chunks": 0,
-                "excluded_current_vectors": 0}
+                "excluded_current_vectors": 0,
+                "ignore_rules_sha256": manifest.get("ignore_rules_sha256")}
     return stored, evidence
 
 
@@ -97,10 +97,13 @@ def status(source: Path, vault: Path, *, allow_index_contract_rebase: bool = Fal
         stored, evidence = _snapshot(source, vault, allow_index_contract_rebase)
         current = inventory(vault)
         _require(current == inventory(vault), "invalid", "vault_drift_during_check")
+        rules_changed = ignore_rules_sha256(vault) != evidence["ignore_rules_sha256"]
         added, removed = current.keys() - stored.keys(), stored.keys() - current.keys()
         changed = sum(current[p] != stored[p] for p in current.keys() & stored.keys())
-        stale = bool(added or removed or changed)
-        return {"state": "stale" if stale else "fresh", "reasons": ["inventory_changed"] if stale else [],
+        reasons = (["inventory_changed"] if added or removed or changed else []) + (
+            ["ignore_rules_changed"] if rules_changed else [])
+        stale = bool(reasons)
+        return {"state": "stale" if stale else "fresh", "reasons": reasons,
                 "delta": {"added": len(added), "removed": len(removed), "changed": changed},
                 "current_inventory_sha256": digest(current), "snapshot": evidence}
     except Rejected as exc:

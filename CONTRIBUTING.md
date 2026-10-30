@@ -60,15 +60,19 @@ Examples: `feat(models): verify every download against its pinned sha256`,
 
 - **Index-contract files.** Editing a file listed in `CODE_FILES` in `src/quoth/refresh.py`
   (`chunker.py`, `db.py`, `dense.py`, `embed/backends.py`, `embed/store.py`, `entities.py`,
-  `ingest.py`, `scopes.py`, `scopes.toml`, `search.py`), `refresh.py` or `freshness.py`, or
+  `ingest.py`, `links.py`, `scopes.py`, `scopes.toml`, `search.py`, `vault.py`), `refresh.py` or `freshness.py`, or
   any evidence-DB migration, changes the code digests, and every existing snapshot becomes
   incompatible until it is rebuilt (`search.py` alone is serving-only and exempt). Put
   serving-speed changes in the serving modules instead, and call out any index-contract
   change in the PR. See [`docs/FRESHNESS.md`](docs/FRESHNESS.md).
-- **Migrations are additive.** Add a new numbered SQL file in `src/quoth/migrations/` (the
-  evidence database) or `src/quoth/ledger/migrations/` (the ledger); never edit or delete an
-  existing one.
-- **Never delete memory.** Forgetting is `valid_to` / `superseded_by`, not `DELETE`.
+- **Migrations.** The ledger and the episode lanes hold data that is never rebuilt, so their
+  migrations (`src/quoth/ledger/migrations/`, the episodes schema) are additive: add a new
+  numbered file, never edit or delete one. The evidence database is rebuilt from the vault, so
+  before 1.0 its schema stays one clean file (`src/quoth/migrations/0001_evidence.sql`) edited in
+  place; such a change is an index-contract change that needs a full `quoth snapshot`.
+- **Never delete memory.** Forgetting a claim is `valid_to` / `superseded_by`, not `DELETE`.
+  The one exception is vault exclusion: a note excluded from indexing is purged from the next
+  snapshot, history included.
 - **Read-only serving stays read-only.** `quoth mcp` must expose only `evidence_bundle`.
 - **Public surfaces.** The CLI, the MCP tool, the sidecar's `/v1` API and `quoth.evals` are
   the public API. Document changes to them in `docs/`.

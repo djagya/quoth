@@ -172,10 +172,14 @@ class Gate:
         return self.claims_min_cosine is not None or self.claims_min_lexical is not None
 
     def vault(self, cosine: float | None, top: float | None, lexical: float | None,
-              matched: int = 0, rerank: float | None = None, rerank_top: float | None = None) -> tuple[bool, str]:
+              matched: int = 0, rerank: float | None = None, rerank_top: float | None = None,
+              named: bool = False) -> tuple[bool, str]:
         """(passes, reason) for one vault hit; `top` is the turn's best vault cosine,
         `matched` how many query words the hit holds; `rerank` its rerank score when the
-        turn's hits are scored (None: the cosine rules apply), `rerank_top` the best one."""
+        turn's hits are scored (None: the cosine rules apply), `rerank_top` the best one;
+        `named`: the query names the hit's note exactly (`retrieval.named_paths`), which
+        passes the cosine floor and gap (reason ``name``). Hybrid retrieval brings in
+        lexical-only hits; below the floor this is the only way one reaches the block."""
         if self.rerank_on and rerank is not None:
             if self.vault_min_rerank is not None and rerank < self.vault_min_rerank:
                 return False, "rerank_floor"
@@ -187,6 +191,8 @@ class Gate:
             return True, "off"
         if cosine is None:
             return True, "unscored"
+        if named:
+            return True, "name"
         rescue = self.vault_lexical_rescue
         if rescue is not None and lexical is not None and lexical >= rescue and matched >= RESCUE_MIN_TERMS:
             return True, "lexical"
@@ -308,8 +314,8 @@ def judge_vault(gate: Gate, query_terms: frozenset[str], hits: list[dict], k: in
     for h in hits:
         lexical, matched = overlap(query_terms, vault_text(h))
         out.append({"lexical": lexical, "matched": matched})
-    signals = [{"cosine": h.get("cosine"), "lexical": j["lexical"], "matched": j["matched"]}
-               for h, j in zip(hits, out)]
+    signals = [{"cosine": h.get("cosine"), "lexical": j["lexical"], "matched": j["matched"],
+                "named": bool(h.get("named"))} for h, j in zip(hits, out)]
     for j, (passed, reason) in zip(out, decide_vault(gate, signals, k, rerank)):
         j.update(passed=passed, gate=reason)
     if rerank is not None:
@@ -334,16 +340,20 @@ def decide_vault(gate: Gate, items: list[dict], k: int, rerank: list | None = No
     scores = rerank if rerank_usable(gate, rerank, len(items), k) else None
     rerank_top = max(scores[:min(gate.rerank_depth(k), len(items))]) if scores else None
     return [gate.vault(it["cosine"], top, it.get("lexical"), it.get("matched") or 0,
-                       scores[i] if scores and i < len(scores) else None, rerank_top)
+                       scores[i] if scores and i < len(scores) else None, rerank_top,
+                       bool(it.get("named")))
             for i, it in enumerate(items)]
 
 
-def vault_pick(gate: Gate, passed: list[bool], pool: int, k: int, rerank: list | None = None) -> list[int]:
+def vault_pick(gate: Gate, passed: list[bool], pool: int, k: int, rerank: list | None = None,
+               notes: list | None = None, per_note: int | None = D.MAX_HITS_PER_NOTE["prefetch"]) -> list[int]:
     """Indices of the vault hits a turn injects, in block order: the first `k` that pass
-    among the turn's candidates (gate before the cut). The candidates are the `pool` best by
-    cosine; when rerank rules apply (every hit the turn reranks is scored) only the reranked
-    hits, in cosine order, or with a widen by rerank score, since an unscored hit was never
-    judged by the rules that decide this turn."""
+    among the turn's candidates (gate before the cut). The candidates are the `pool` best in
+    retrieval order; when rerank rules apply (every hit the turn reranks is scored) only the
+    reranked hits, in retrieval order, or with a widen by rerank score, since an unscored hit
+    was never judged by the rules that decide this turn. With `notes` (each hit's note key)
+    at most `per_note` passing hits of one note come before any repeat, and a repeat only
+    fills a slot no other note can."""
     n = len(passed)
     if rerank_usable(gate, rerank, n, k):
         depth = min(gate.rerank_depth(k), n)
@@ -351,7 +361,18 @@ def vault_pick(gate: Gate, passed: list[bool], pool: int, k: int, rerank: list |
                  else list(range(depth)))
     else:
         order = list(range(min(pool, n)))
-    return [i for i in order if passed[i]][:k]
+    picked = [i for i in order if passed[i]]
+    if notes is None or per_note is None:
+        return picked[:k]
+    counts: dict = {}
+    first, repeats = [], []
+    for i in picked:
+        if notes[i] is None:  # an unknown note counts as its own
+            first.append(i)
+            continue
+        counts[notes[i]] = counts.get(notes[i], 0) + 1
+        (first if counts[notes[i]] <= per_note else repeats).append(i)
+    return (first + repeats)[:k]
 
 
 def judge_claim(gate: Gate, query_terms: frozenset[str], claim: dict, cosine: float | None,

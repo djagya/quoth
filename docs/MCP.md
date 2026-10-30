@@ -10,6 +10,8 @@ quoth mcp --db /path/to/snapshot.db
 | Flag | Default | Meaning |
 |---|---|---|
 | `--db PATH` | `$QUOTH_HOME/memory.db` | the snapshot to serve: a database file, or a symlink pointing at one |
+| `--vault DIR` | off | the live vault root, read-only: each hit says whether its note changed since indexing (`live`) |
+| `--retrieval hybrid\|dense` | `dense` | vault ranking (below) |
 
 The database is opened with SQLite `mode=ro` and `query_only=ON` and its schema is
 validated at startup. A plain file is served as it is (handy for a development database).
@@ -22,15 +24,23 @@ background, so the stdio handshake never waits for it.
 
 ## Tool: `evidence_bundle`
 
-Dense BGE-M3 retrieval over the snapshot's current chunks. It returns bounded excerpts with
-provenance, not an answer. Clients usually see it as `mcp__<server name>__evidence_bundle`.
+Retrieval over the snapshot's current chunks, by BGE-M3 cosine (default) or, with
+`--retrieval hybrid`, by BGE-M3 cosine, BM25 and trigram
+full-text lists and the notes the query names, fused by reciprocal rank (the same ranking as
+the sidecar's recall: [HERMES.md](HERMES.md#vault-retrieval)); `--retrieval dense` ranks by
+cosine alone. It returns bounded excerpts with provenance, not an answer. At most 2 hits of
+one note come before any repeat, and an excerpt repeated at another path is returned once.
+Clients usually see it as `mcp__<server name>__evidence_bundle`.
 
 ### Input
 
 | Field | Type | Default | Bounds |
 |---|---|---|---|
-| `query` | string | required | 1 to 2048 characters |
+| `query` | string | — | 1 to 2048 characters; give `query` or `path` |
+| `path` | string | — | instead of `query`: one note's vault-relative path, optionally `#Heading`; returns its chunks in line order (that section and its subsections) |
 | `k` | integer | 10 | 1 to 20 |
+| `path_prefix` | string | — | only notes under this vault folder (`PROJECTS/Atlas`); a pre-filter. Use it when a name is ambiguous across projects |
+| `include_explicit` | boolean | false | also search the explicit recall tier (`quoth.scopes.explicit_scopes()`), only when the owner asks about that area |
 | `model` | string | `bge-m3` | one of the known embedders (`bge-m3`, `hash-ngram`, `multilingual-e5-large`, `multilingual-e5-small`); the snapshot must hold vectors for it |
 
 Tool annotations: read-only, not destructive, idempotent, closed world.
@@ -52,13 +62,18 @@ A JSON string:
       "line_start": 1,
       "line_end": 4,
       "scope": "general",
-      "text": "# Sourdough\n\nFeed the starter at a 1:5:5 ratio ...",
+      "project": "KNOWLEDGE",
+      "text": "# Sourdough\n\nFeed the starter at a 1:5:5 ratio, see [[Starter log]] ...",
       "note_date": null,
       "date_basis": "none",
+      "links": [{"path": "KNOWLEDGE/Starter log.md", "heading": null},
+                {"text": "Private recipes", "status": "excluded"}],
+      "live": "same",
       "provenance": {"snapshot_id": "<sha256 of the snapshot>"}
     }
   ],
-  "provenance": {"snapshot_id": "<sha256 of the snapshot>"}
+  "provenance": {"snapshot_id": "<sha256 of the snapshot>", "indexed_at": "2026-10-28T03:12:44Z",
+                 "retrieval": "hybrid", "live_check": {"stats": 1, "hashes": 0, "unchecked": 0, "ms": 0.05}}
 }
 ```
 
@@ -71,7 +86,13 @@ A JSON string:
 | `hits[].text` | the excerpt, at most 1,800 characters; the whole response holds at most 18,000 |
 | `hits[].note_date` | the date the note was written, when its filename and frontmatter agree, else `null` |
 | `hits[].date_basis` | `validated_note_date`, `filename_only` or `none` |
+| `hits[].project` | the note's top-level vault folder, `""` at the vault root |
+| `hits[].links` | up to 5 links in the chunk: `{path, heading}` when resolved (fetch it with `path`), else `{text, status}` with `status` `unresolved` or `excluded` (the target is not available through quoth: never a path). Absent when the chunk links nowhere |
+| `hits[].live` | with `--vault`: `same`, `changed` (the note changed since indexing: read the live note) or `missing` (no longer in the vault). Absent without `--vault` or past the per-call cap (10 stats, 3 hashes) |
 | `provenance.snapshot_id` | SHA-256 of the snapshot the excerpts came from |
+| `provenance.indexed_at` | when the snapshot was built (manifest `built_at`, UTC), `null` if unknown |
+| `provenance.retrieval` | `hybrid`, `dense`, or `note` for a `path` fetch |
+| `provenance.live_check` | with `--vault`: stats and hashes this call spent, hits left unchecked, milliseconds |
 
 A note's date is not the date of the events it describes. Rank is retrieval order, not an
 authority or truth score.
@@ -82,7 +103,9 @@ Invalid input and retrieval failures are raised, so a client always sees an MCP 
 (`isError`), never an error object in the data. The server fails rather than degrades when
 the schema is invalid, the model has no current vectors, vector sizes are wrong, the local
 model files are missing, or the input is out of bounds. There is no model download and no
-lexical fallback.
+lexical-only fallback: hybrid ranking needs the vectors too. A `path` that names no served
+note (absent, purged by an exclusion, or in the explicit tier without `include_explicit`)
+fails with the same `not_found`, whatever the reason.
 
 ## Caller contract
 

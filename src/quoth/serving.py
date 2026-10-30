@@ -133,6 +133,17 @@ def _digest(key: tuple) -> str:
     return hashlib.sha256(repr(key[0] if key else '').encode()).hexdigest()[:16]
 
 
+def _built_at(target: Path) -> str | None:
+    """The manifest's build time (`snapshot_contract.manifest_built_at`), best-effort: a plain
+    DB without a manifest, or a manifest without the field, has none."""
+    from .snapshot_contract import manifest_built_at
+    try:
+        manifest = json.loads(target.with_suffix('.manifest.json').read_bytes())
+    except (OSError, ValueError):
+        return None
+    return manifest_built_at(manifest) if isinstance(manifest, dict) else None
+
+
 def _stamp() -> str:
     return datetime.now(UTC).isoformat(timespec='seconds').replace('+00:00', 'Z')
 
@@ -163,6 +174,7 @@ class ServingSnapshot:
         self.prepare = None
         self.conn = None
         self.snapshot_id = None
+        self.built_at = None  # manifest `built_at` of the admitted snapshot (UTC ISO-8601)
         self.target = None
         self._key = None
         self._candidate = None
@@ -180,14 +192,14 @@ class ServingSnapshot:
             except BaseException:
                 conn.close()
                 raise
-            self.conn, self.target = conn, target
+            self.conn, self.target, self.built_at = conn, target, _built_at(target)
             return
         if require:
             key, target, reason = _observe(self.path)
             if reason is not None:
                 raise ValueError(reason)
             self.conn, self.snapshot_id = open_snapshot(target)
-            self.target, self._key = target, key
+            self.target, self._key, self.built_at = target, key, _built_at(target)
         else:
             self.poll()
 
@@ -245,9 +257,11 @@ class ServingSnapshot:
         if _observe(self.path)[0] != key:
             _discard(conn)
             return 'pointer_changed'
+        built_at = _built_at(target)
         with self.lock:
             old = self.conn
             self.conn, self.snapshot_id, self.target, self._key = conn, identity, target, key
+            self.built_at = built_at
             self._candidate = self._rejected = None
             if old is not None:
                 _discard(old)

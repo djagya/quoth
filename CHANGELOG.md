@@ -3,6 +3,101 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
+## 0.17.0 — vault exclusion, freshness per hit, opt-in hybrid retrieval
+
+### Index format change: rebuild every snapshot
+
+**The evidence schema and the index-contract files changed. Existing snapshots are
+incompatible and cannot be refreshed: build a fresh one with `quoth snapshot`** and switch
+the serving pointer to it ([FRESHNESS.md](docs/FRESHNESS.md#rebuilding-across-an-index-change)).
+`0001_evidence.sql` was edited in place, so a fresh snapshot has one clean schema.
+
+### Index
+
+- **Exclusion, one path.** `.quothignore` at the vault root (gitignore syntax: comments,
+  `!` negation, folder-only `/`, `*`, `?`, `[...]`, `**`, root anchoring) and frontmatter
+  `quoth: exclude` keep notes out of the index; `exclude_dirs` in `scopes.toml` and hidden
+  names are the built-in defaults that `.quothignore` adds to and cannot override. Excluded
+  notes are never read into the index (`vault.py`; ingest and the freshness inventory share
+  it).
+- **Excluded means purged.** A note that becomes excluded loses every row in the next
+  snapshot, current and historical: source, versions, chunks, vectors, entities, lexical and
+  link rows (`ingest.purged`). This includes rows earlier releases kept as retired history
+  under `ASSISTANT/`. A snapshot holding any row under a built-in exclusion is `invalid`.
+- **Rollback re-exposes excluded material.** Older snapshots still hold notes you have since
+  excluded; pointing serving back at one serves them again. Delete such snapshots (and
+  bundles made from them) once the rebuilt one is accepted.
+- **Rules count as vault content.** The manifest records `ignore_rules_sha256`; changing,
+  adding or removing `.quothignore` makes a snapshot `stale` (`ignore_rules_changed`).
+- **Links table.** Wikilinks, aliases, heading links, embeds and relative Markdown links are
+  stored per current chunk (`links`: `target`, `heading`, `line`, `kind`, `status`,
+  `target_path`), resolved Obsidian-style on every build: `resolved`, `missing`,
+  `ambiguous`, or `excluded` (the excluded note's path is never stored).
+- **File facts for staleness.** `source_versions` gains `mtime_ns` and `size_bytes` beside
+  `content_hash`, so serving can tell that a note changed since indexing.
+- **Recall tiers.** Scopes are declared in `scopes.toml` with `recall = "auto" | "explicit"`
+  (`quoth.scopes.recall_tier`, `quoth.scopes.explicit_scopes`); a new `private` scope is
+  `explicit`.
+- **Manifest `built_at`.** Every snapshot manifest records when it was built (UTC ISO-8601).
+- **`quoth snapshot --resume`** continues a killed first build from its checkpoint (same
+  target and vault, same code and model digests) instead of failing on the leftover target.
+- Bundles carry the `links` table; in a scoped bundle, links to notes outside the scope
+  become `excluded`.
+
+### Serving
+
+- **Hybrid retrieval, opt-in** (`--retrieval hybrid`; the default stays `dense`, cosine
+  only) for recall and `evidence_bundle` alike (`quoth.retrieval`): BGE-M3 cosine fused by reciprocal rank with the snapshot's BM25 and trigram lists and the notes the
+  query names (title, alias or path), so exact names and paths are found. The gate still
+  judges each hit's real cosine; a lexical-only hit below the floor passes only when the query
+  names its note (gate reason `name`). It is not the default: on the golden sets the
+  equal-weight fusion lets the three keyword lists outvote the dense one (golden-v1 hit@10
+  0.47 hybrid vs 0.90 dense, golden-v3 0.76 vs 0.93), worst on Russian questions. It stays
+  opt-in until the fusion is reweighted and measured.
+- **Per-note diversity**: recall serves at most 1 hit per note before any repeat, an explicit
+  bundle at most 2; an excerpt repeated at another path is returned once.
+- **`evidence_bundle` gains `path_prefix`** (a folder pre-filter, for names shared across
+  projects), **`path`** (read one note's chunks in order, optionally `#Heading`: follow a link),
+  and **`include_explicit`**. Every hit carries `project` (its top-level folder) and `links`
+  (resolved targets as fetchable paths; excluded targets as text only, never a path). A `path`
+  that names no served note answers `not_found`, the same for every reason.
+- **Freshness per hit**: with `--vault DIR` (sidecar and `quoth mcp`) each hit says `live`:
+  `same`, `changed` or `missing`, checked by stat and, only when needed, a hash (at most 10
+  stats and 3 hashes per call). Bundle provenance carries `indexed_at` (the manifest's
+  `built_at`). The recall block opens its vault section with `Vault indexed as of …`, marks a
+  changed note `[changed since indexing: read the live note]` and names a hit's links.
+- **Recall tiers**: recall never injects notes of the explicit tier
+  (`quoth.scopes.explicit_scopes()`); `evidence_bundle` includes them only with
+  `include_explicit`. Both filter before ranking.
+
+### Measurement
+
+- Prefetch-log records carry `snapshot_id`, `retrieval` and the gate settings.
+- **Record-only late-tail measurement** (prefetch log schema 2). Each authored turn gets a
+  request id before its search is submitted and writes `start` (code digest, config and its
+  digest, budgets, gate, k), `submitted` or `busy` (a busy turn starts no job and names the
+  running one), `wait` (the effective deadline) and its `prefetch` return line; its evidence
+  job writes exactly one `done` line, joined by id in any order: `normal` (the snapshot the
+  job searched, raw count, candidate locators and the post-gate would-inject locators with
+  the turn's own gate, or `unknown` when the decision needs a rerank that was not computed),
+  `exception` (type name only) or `censored` at shutdown. Every line carries the process
+  instance; `instance` and `counters` lines (every 300 s and at close: dropped and failed
+  lines, jobs in flight, unjoined completions) keep lost lines visible. No query, excerpt
+  or claim text, no extra search or rerank, and no change to answers, gates or budgets. The
+  0.17 development `late` record is replaced by `done`.
+- `eval online` joins each explicit search to its session's last prefetch (`explicit_join`:
+  injected, pooled but not injected, never pooled) and reports the late tail of a bounded
+  window (`late_tail`; `--since`, `--until`, `--max-turns`): strata by version, code, config
+  and snapshot, slow and busy apart, completion against the effective deadline, what 1.5,
+  2.0, 2.5 and 2.8 s budgets would add (admissible nonempty vs empty or unknown), request and
+  job durations with headroom inside the 3 s client deadline, exact denominators with missing,
+  dropped and unjoined lines, and a descriptive note overlap with the next explicit search.
+- `eval run` scores the explicit bundle beside the prefetch (`explicit` in the receipt),
+  records `config.retrieval`, takes `--retrieval` and `--vault`, and `--trace-out FILE` writes
+  a private per-row trace (query, exact recall block, explicit hits) for caller tests;
+  `--oracle FILE` joins a caller's oracle source text to it by row id, into a separate
+  private file (`--oracle-out`).
+
 ## 0.16.0 — one recall path, snapshot admission off the request path
 
 ### Recall

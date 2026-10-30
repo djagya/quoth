@@ -201,6 +201,10 @@ def test_cli_interrupted_resumed_switch_with_real_pair_scoring(tmp_path, monkeyp
     from quoth.search import search
     from quoth.serving import open_snapshot
 
+    # A constant query vector ties every cosine: score densely, so the new note's exact words
+    # do not outrank the gold (this test is about resuming, not ranking).
+    from quoth import recall_defaults
+    monkeypatch.setattr(recall_defaults, 'RETRIEVAL', 'dense')
     src, vault, pointer = setup(tmp_path)
     (vault / 'new.md').write_text('# New\nSynthetic evidence.')
     row = {'id': 'fixture-1', 'question': 'Synthetic evidence', 'kind': 'ordinary',

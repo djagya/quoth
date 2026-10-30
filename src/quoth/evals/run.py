@@ -20,6 +20,7 @@ from pathlib import Path
 import time
 
 from .. import __version__
+from .. import recall_defaults as D
 from . import metrics as M
 from . import sweep as SW
 from .format import EvalSet, vault_paths
@@ -73,12 +74,15 @@ class InProcessTarget:
               model: str = "bge-m3", evidence_budget: float | None = None,
               episodes_prefetch: bool = False, owner_prefetch: bool = True,
               assistant_min_score: float | None = None, owner_min_score: float | None = None,
-              core_dir=None, embedder=None, gate=None, reranker=None) -> "InProcessTarget":
+              core_dir=None, embedder=None, gate=None, reranker=None, retrieval: str | None = None,
+              vault=None) -> "InProcessTarget":
         """`embedder` (optional) is an already loaded model for `model`, shared instead of
         loading another copy (the nightly gate scores two snapshots with one bge-m3);
         `gate` a `relevance.Gate` (default `relevance.default_gate()`, as the sidecar serves;
         `relevance.Gate()` for none), as the sidecar's gate flags set it;
-        `reranker` a `rerank.RerankService` (default none), as `--rerank-model` sets it."""
+        `reranker` a `rerank.RerankService` (default none), as `--rerank-model` sets it;
+        `retrieval` "hybrid" or "dense" (default `recall_defaults.RETRIEVAL`) and `vault` (the
+        live vault root, for per-hit freshness), as the sidecar's `--retrieval` and `--vault`."""
         from .. import sidecar
         if ledger is None:
             raise RunError("ledger path required")
@@ -86,7 +90,9 @@ class InProcessTarget:
         if db:
             from ..evidence_service import ReadOnlyEvidence
             from ..serving import ServingSnapshot
-            evidence = ReadOnlyEvidence(ServingSnapshot(str(db)))
+            from .. import recall_defaults as D
+            evidence = ReadOnlyEvidence(ServingSnapshot(str(db)), retrieval=retrieval or D.RETRIEVAL,
+                                        vault=vault)
             if embedder is not None:
                 evidence.queries.seed(model, embedder)
         assistant = sidecar._open_episodes(episodes, model, evidence) if episodes else None
@@ -120,9 +126,14 @@ class InProcessTarget:
         self.app.wait_idle()
         return out
 
+    def evidence(self, body: dict) -> dict:
+        """The explicit `evidence_bundle` call (what the assistant's tool gets)."""
+        return self.app.evidence_bundle(body)
+
     def config(self) -> dict:
         app = self.app
         return {"mode": self.mode, "model": app.model, "evidence_budget": app.evidence_budget,
+                "retrieval": app.retrieval,
                 "stores": {"vault": app.evidence is not None, "claims": True,
                            "owner": app.owner_lane is not None, "assistant": app.assistant_lane is not None},
                 "prefetch": {"owner": bool(app.owner_lane and app.owner_lane.prefetch),
@@ -191,9 +202,12 @@ class SocketTarget:
             raise RunError("sidecar too old: dry-run detail has no candidates (needs quoth >= 0.10)")
         return out
 
+    def evidence(self, body: dict) -> dict:
+        return self._post("/v1/evidence", body)
+
     def config(self) -> dict:
         health = self._post("/v1/health", None, allow_unhealthy=True)
-        return {"mode": self.mode, "sidecar_version": health.get("version"),
+        return {"mode": self.mode, "sidecar_version": health.get("version"), "retrieval": health.get("retrieval"),
                 "stores": {"vault": health.get("evidence", {}).get("status") == "ok", "claims": True,
                            "owner": health.get("owner_episodes", {}).get("status") not in (None, "disabled"),
                            "assistant": health.get("episodes", {}).get("status") not in (None, "disabled")},
@@ -254,9 +268,56 @@ def _guard_no_text(receipt: dict, evalset: EvalSet) -> None:
                 raise RunError(f"{row['id']}: receipt would contain row content; refusing")
 
 
+TRACE_SCHEMA = "quoth-eval-trace/v1"
+EXPLICIT_K = 10
+
+
+def explicit_observation(row: dict, hits: list[dict], sources: list) -> dict:
+    """Content-free score of the explicit `evidence_bundle` for one row: the rank of each
+    expected vault path, and how many hits repeat a note or are marked changed."""
+    wanted = [s["match"]["path"] for s in sources if s["store"] == "vault" and "path" in s["match"]]
+    paths = [h.get("path") for h in hits]
+    ranks = [next((i for i, p in enumerate(paths, 1) if p == w), None) for w in wanted]
+    return {"expected": len(wanted), "ranks": ranks, "hits": len(hits),
+            "repeats": len(paths) - len(set(paths)), "changed": sum(h.get("live") == "changed" for h in hits)}
+
+
+def explicit_metrics(observations: list[dict]) -> dict | None:
+    """hit@k / recall@10 of the explicit bundle over rows with vault gold, and repeats."""
+    rows = [o for o in observations if o["expected"]]
+    if not observations:
+        return None
+    out = {"rows": len(rows), "calls": len(observations),
+           "repeat_rate": round(sum(o["repeats"] for o in observations)
+                                / max(1, sum(o["hits"] for o in observations)), 4),
+           "changed_hits": sum(o["changed"] for o in observations)}
+    for k in (1, 3, 5, 10):
+        out[f"hit@{k}"] = round(sum(any(r is not None and r <= k for r in o["ranks"]) for o in rows)
+                                / len(rows), 4) if rows else None
+    out["recall@10"] = round(sum(sum(r is not None and r <= 10 for r in o["ranks"]) / o["expected"] for o in rows)
+                             / len(rows), 4) if rows else None
+    return out
+
+
+def trace_line(row: dict, prefetch: dict, explicit: dict | None, settings: dict) -> dict:
+    """One `--trace-out` line: the exact recall block and the explicit hits of one row
+    (private: holds the question and excerpts)."""
+    provenance = ((explicit or {}).get("provenance") or ((prefetch.get("detail") or {}).get("provenance")) or {})
+    return {"id": row["id"], "snapshot_id": provenance.get("snapshot_id"), "quoth_version": __version__,
+            "settings": settings, "query": row["question"], "lang": row["lang"],
+            "prefetch_block": prefetch.get("text") or "",
+            "explicit": [{"locator": h.get("locator"), "note_date": h.get("note_date"),
+                          "project": h.get("project"), "live": h.get("live"), "text": h.get("text")}
+                         for h in (explicit or {}).get("hits", [])],
+            "labels": {"answerable": not row["expect"]["abstain"], "kind": row["kind"]}}
+
+
 def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATES,
-            gold_drift: bool = False, detail: bool = False, warmup: bool = True) -> tuple[Receipt, list | None]:
-    """Run every row through `target.prefetch` (dry run). Returns (receipt, per-row detail|None)."""
+            gold_drift: bool = False, detail: bool = False, warmup: bool = True,
+            trace: list | None = None) -> tuple[Receipt, list | None]:
+    """Run every row through `target.prefetch` (dry run) and, with a vault, the explicit
+    `evidence_bundle` (`target.evidence`). Returns (receipt, per-row detail|None); with
+    `trace` (a list), one `trace_line` per row is appended to it."""
     target.prepare()
     if warmup:
         target.prefetch({"query": WARMUP_QUERY, "dry_run": True, "k_candidates": k_candidates})
@@ -272,6 +333,13 @@ def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATE
         except ExcessiveDrift as exc:
             drift, status = report_only(exc.report), "gold_drift_excessive"
     observations, timings, statuses, rows_detail, recorded = [], [], {}, [], {}
+    explicit_obs = []
+    config = target.config()
+    explicit_on = bool((config.get("stores") or {}).get("vault")) and hasattr(target, "evidence")
+    settings = {"gate": config.get("gate"), "retrieval": config.get("retrieval"),
+                "evidence_budget": config.get("evidence_budget"), "k_candidates": k_candidates,
+                "k_evidence": D.PREFETCH_EVIDENCE, "k_explicit": EXPLICIT_K,
+                "max_hits_per_note": D.MAX_HITS_PER_NOTE}
     if status == "ok":
         for row in evalset.rows:
             sources = _resolved_sources(row, resolved)
@@ -280,10 +348,24 @@ def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATE
             out = target.prefetch({"query": row["question"], "dry_run": True, "k_candidates": k_candidates,
                                    "k_rerank": k_candidates})
             wall = round((time.monotonic() - t0) * 1000, 2)
+            explicit = None
+            if explicit_on:
+                from ..sidecar import prefetch_query
+                t1 = time.monotonic()
+                explicit = target.evidence({"query": prefetch_query(row["question"]) or row["question"],
+                                            "k": EXPLICIT_K, "dry_run": True})
+                explicit_ms = round((time.monotonic() - t1) * 1000, 2)
+            if trace is not None:
+                trace.append(trace_line(row, out, explicit, settings))
             d = out.get("detail") or {}
             candidates = d.get("candidates") or {}
             stage = dict(d.get("timings_ms") or {})
             stage["wall"] = wall
+            if explicit is not None:
+                stage["explicit"] = explicit_ms
+                live = (explicit.get("provenance") or {}).get("live_check")
+                if live:
+                    stage["explicit_live"] = live["ms"]
             timings.append(stage)
             for store, st in (d.get("status") or {}).items():
                 statuses.setdefault(store, {}).setdefault(st, 0)
@@ -294,6 +376,8 @@ def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATE
                     continue
             obs = M.observe(row, candidates, sources=sources)
             observations.append(obs)
+            if explicit is not None:
+                explicit_obs.append(explicit_observation(row, explicit.get("hits", []), sources))
             recorded[row["id"]] = SW.record(row, candidates, sources, timings=stage)
             if detail:
                 rows_detail.append({"id": row["id"], "kind": row["kind"], "origin": row["origin"],
@@ -307,12 +391,13 @@ def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATE
         "set": {"schema": evalset.manifest.get("schema"), "sha256": evalset.sha256,
                 "rows": len(evalset.rows), "privacy": evalset.manifest.get("privacy"),
                 "fixture": evalset.manifest.get("fixture")},
-        "config": {**target.config(), "k_candidates": k_candidates, "gold_drift": gold_drift,
+        "config": {**config, "k_candidates": k_candidates, "gold_drift": gold_drift,
                    "context": "ignored", "asked_at": "ignored"},
         "status": status,
         "gold_drift": drift,
         "scored": len(observations),
         "metrics": M.aggregate(observations) if observations else None,
+        "explicit": explicit_metrics(explicit_obs),
         "latency_ms": M.latency(timings),
         "statuses": statuses,
         "items": M.items(observations),

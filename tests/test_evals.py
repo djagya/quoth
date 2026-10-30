@@ -169,7 +169,9 @@ def built(tmp_path_factory):
 def run(built):
     # No gate (hash-ngram cosines sit under the bge-m3 serving floor): the sweep's baseline.
     from quoth.relevance import Gate
-    target = InProcessTarget.build(**built["paths"], model=built["model"], episodes_prefetch=True, gate=Gate())
+    # Dense ranking: the parity oracles below are the dense v0.11.0 evaluator.
+    target = InProcessTarget.build(**built["paths"], model=built["model"], episodes_prefetch=True, gate=Gate(),
+                                   retrieval="dense")
     try:
         receipt, detail = run_set(load_set(SET), target, gold_drift=True, detail=True)
     finally:
@@ -323,7 +325,7 @@ def test_sweep_replay_matches_a_live_gated_run(built, run):
     receipt, _ = run
     replayed, _ = evaluate(receipt.data["candidates"]["rows"], Gate.from_dict(GATE))
     target = InProcessTarget.build(**built["paths"], model=built["model"], episodes_prefetch=True,
-                                   gate=Gate.from_dict(GATE))
+                                   gate=Gate.from_dict(GATE), retrieval="dense")
     try:
         gated, _ = run_set(load_set(SET), target, gold_drift=True)
     finally:
@@ -428,7 +430,7 @@ def test_parity_with_gate_metrics_on_legacy_golden(tmp_path, monkeypatch):
     convert("golden-v1", REPO / "eval" / "golden.jsonl", tmp_path / "golden.jsonl", privacy="public",
             fixture="tests/conftest.py", origin="synthetic")
     evalset = load_set(tmp_path / "golden.jsonl")
-    target = InProcessTarget.build(db=db, ledger=tmp_path / "ledger.db", model="hash-ngram")
+    target = InProcessTarget.build(db=db, ledger=tmp_path / "ledger.db", model="hash-ngram", retrieval="dense")
     try:
         receipt, _ = run_set(evalset, target)
     finally:
@@ -496,3 +498,55 @@ def test_shipped_golden_fixture_is_synthetic():
     evalset = convert_in_memory("golden-v1", REPO / "eval" / "golden.jsonl")
     assert [to_golden_v1(r) for r in evalset.rows] == rows
     assert evalset.manifest["source"]["format"] == "golden-v1"
+
+
+def test_cli_oracle_join_is_a_separate_private_file(built, tmp_path, capsys):
+    fixture_dir = str(Path(built["paths"]["db"]).parent)
+    rows = load_set(SET).rows
+    oracle = tmp_path / "oracle.jsonl"
+    oracle.write_text("".join(json.dumps({"id": r["id"], "oracle": [{"locator": "x.md:1-2", "text": f"src {r['id']}"}]})
+                              + "\n" for r in rows[:2]) + json.dumps({"id": "not-in-set", "oracle": "x"}) + "\n")
+    trace = tmp_path / "run.trace.jsonl"
+    args = ["eval", "run", str(SET), "--fixture-dir", fixture_dir, "--trace-out", str(trace), "--quiet"]
+    assert cli_main([*args, "--oracle", str(oracle)]) == 0
+    err = capsys.readouterr().err
+    joined = tmp_path / "run.trace.oracle.jsonl"
+    assert "oracle join: 2/" in err and "1 oracle ids not in the run" in err
+    assert oct(joined.stat().st_mode & 0o777) == "0o600"
+    plain = [json.loads(x) for x in trace.read_text().splitlines()]
+    lines = [json.loads(x) for x in joined.read_text().splitlines()]
+    assert all("oracle" not in t for t in plain)  # the trace itself never holds oracle text
+    assert [t["id"] for t in lines] == [t["id"] for t in plain]
+    assert lines[0]["oracle"][0]["text"] == f"src {rows[0]['id']}" and lines[0]["oracle_found"]
+    assert lines[-1]["oracle"] is None and lines[-1]["oracle_found"] is False
+    assert cli_main(["eval", "run", str(SET), "--fixture-dir", fixture_dir, "--oracle", str(oracle),
+                     "--quiet"]) == 2  # needs --trace-out
+
+
+def test_cli_trace_out_and_both_retrieval_modes(built, tmp_path, capsys):
+    """`--trace-out` writes the caller-test trace; the explicit bundle is scored in the receipt."""
+    fixture_dir = str(Path(built["paths"]["db"]).parent)
+    evalset = load_set(SET)
+    receipts = {}
+    for mode in ("hybrid", "dense"):
+        out, trace = tmp_path / f"{mode}.json", tmp_path / f"{mode}.trace.jsonl"
+        assert cli_main(["eval", "run", str(SET), "--fixture-dir", fixture_dir, "--out", str(out),
+                         "--trace-out", str(trace), "--retrieval", mode, "--quiet"]) == 0
+        err = capsys.readouterr().err
+        assert "--trace-out" in err and "private" in err and oct(trace.stat().st_mode & 0o777) == "0o600"
+        receipts[mode] = json.loads(out.read_text())
+        lines = [json.loads(x) for x in trace.read_text().splitlines()]
+        assert [r["id"] for r in lines] == [r["id"] for r in evalset.rows]
+        first = lines[0]
+        assert set(first) == {"id", "snapshot_id", "quoth_version", "settings", "query", "lang",
+                              "prefetch_block", "explicit", "labels"}
+        assert first["settings"]["retrieval"] == mode and first["snapshot_id"]
+        assert first["query"] == evalset.rows[0]["question"]
+        assert set(first["labels"]) == {"answerable", "kind"}
+        assert any(r["explicit"] and set(r["explicit"][0]) == {"locator", "note_date", "project", "live", "text"}
+                   for r in lines)
+        assert any(r["prefetch_block"].startswith("<quoth-recall>") for r in lines)
+    for mode, data in receipts.items():
+        assert data["config"]["retrieval"] == mode
+        assert data["explicit"]["calls"] > 0 and data["explicit"]["hit@10"] is not None
+        assert "explicit" in json.dumps(data["latency_ms"])
