@@ -220,8 +220,8 @@ against it.
 ### Vault retrieval
 
 One function (`quoth.retrieval.retrieve`) ranks vault hits for prefetch's pool and for
-`evidence_bundle`, so the two never rank differently. With `--retrieval hybrid` (the default)
-it fuses four lists by reciprocal rank (RRF, k = 60), each up to 50 deep: BGE-M3 cosine over
+`evidence_bundle`, so the two never rank differently. With `--retrieval hybrid` (opt-in; the
+default `dense` ranks by cosine alone) it fuses four lists by reciprocal rank (RRF, k = 60), each up to 50 deep: BGE-M3 cosine over
 the snapshot's vectors, BM25 over the `unicode61` FTS5 index (title, heading, text), the
 trigram FTS5 index (substrings and inflections), and the *named* list, the chunks of notes the
 query names. `--retrieval dense` ranks by cosine alone (the 0.16 behaviour), for comparison.
@@ -337,7 +337,7 @@ Paths default under `$QUOTH_HOME`; the Hermes `state.db` under `$HERMES_HOME`.
 | `--snapshot-watch-interval S` | 5 | seconds between checks of the `--db` pointer |
 | `--core-dir DIR` | off | published core directory (`core.md`); without it `/v1/core` compiles live |
 | `--vault DIR` | off | the live vault root, read-only: each hit says whether its note changed since indexing (`live`) |
-| `--retrieval hybrid\|dense` | `hybrid` | vault ranking ([vault retrieval](#vault-retrieval)) |
+| `--retrieval hybrid\|dense` | `dense` | vault ranking ([vault retrieval](#vault-retrieval)) |
 | `--model NAME` | `bge-m3` | query embedder |
 | `--no-warm` | off | skip the background model warm-up |
 | `--claim-sync-interval S` | 60 | seconds between claim-index passes |
@@ -414,7 +414,7 @@ Integer fields are clamped to their range (`max(lo, min(n, hi))`); for example `
               "newest": "…", "last_tick_at": "…", "prefetch": false},
  "owner_episodes": {"…": "same shape"},
  "relevance_gate": {"vault_min_cosine": null, "…": null, "vault_on": false, "claims_on": false},
- "retrieval": "hybrid", "live_check": false}
+ "retrieval": "dense", "live_check": false}
 ```
 
 `status` is `red` when the ledger queue is red (more than 40 pending, or the oldest older

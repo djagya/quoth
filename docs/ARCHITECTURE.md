@@ -13,7 +13,7 @@ Everything runs locally on CPU. Nothing listens on the network.
 
 | Component | Code | What it does |
 |---|---|---|
-| Evidence engine | `ingest.py`, `chunker.py`, `embed/`, `dense.py`, `search.py`, `retrieval.py`, `live.py`, `snapshot_contract.py`, `evidence.py`, `evidence_service.py` | Incremental vault ingest by path and SHA-256; heading-aware chunks (about 1,200 characters with 200 of overlap, long paragraphs cut at sentence ends) with line locators; BGE-M3 vectors of each chunk under its note title, aliases and heading path; hybrid top-k (dense + BM25 + trigram + named notes, RRF) with path and tier pre-filters and per-note diversity; links, per-hit freshness and bounded evidence bundles |
+| Evidence engine | `ingest.py`, `chunker.py`, `embed/`, `dense.py`, `search.py`, `retrieval.py`, `live.py`, `snapshot_contract.py`, `evidence.py`, `evidence_service.py` | Incremental vault ingest by path and SHA-256; heading-aware chunks (about 1,200 characters with 200 of overlap, long paragraphs cut at sentence ends) with line locators; BGE-M3 vectors of each chunk under its note title, aliases and heading path; dense top-k (opt-in hybrid: dense + BM25 + trigram + named notes, RRF) with path and tier pre-filters and per-note diversity; links, per-hit freshness and bounded evidence bundles |
 | Snapshots | `refresh.py`, `freshness.py`, `serving.py`, `migrations/` | The evidence schema (vault notes, versions, chunks, vectors and the lexical indexes); builds a new frozen snapshot plus manifest, checks freshness against the vault and the code, admits a snapshot (or a symlink pointer to one) for read-only serving |
 | Bundles | `bundle.py` | Portable full or scope-only copies of a snapshot with a verifiable manifest |
 | Nightly refresh | `nightly.py`, `quality.py`, `heartbeat.py`, `gold_drift.py` | Builds a successor when the vault changed, scores it against the serving snapshot, switches the pointer only when it passes, writes receipts and a heartbeat |
@@ -87,8 +87,8 @@ flowchart LR
 
 ## Design decisions
 
-**Hybrid retrieval, judged by cosine.** One function (`retrieval.py`) ranks vault hits for
-recall and for `evidence_bundle`: BGE-M3 cosine fused by reciprocal rank with the snapshot's
+**One retrieval, judged by cosine.** One function (`retrieval.py`) ranks vault hits for
+recall and for `evidence_bundle`: BGE-M3 cosine by default; opt-in hybrid mode fuses it by reciprocal rank with the snapshot's
 BM25 and trigram lists and the notes the query names, so exact names and paths a dense model
 blurs are found. One multilingual model covers mixed-language vaults, runs on CPU through
 ONNX Runtime, and gives scores with an absolute meaning, which the relevance gate needs: every

@@ -3,7 +3,7 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
-## 0.17.0 — hybrid retrieval, vault exclusion, freshness per hit
+## 0.17.0 — vault exclusion, freshness per hit, opt-in hybrid retrieval
 
 ### Index format change: rebuild every snapshot
 
@@ -46,12 +46,14 @@ the serving pointer to it ([FRESHNESS.md](docs/FRESHNESS.md#rebuilding-across-an
 
 ### Serving
 
-- **Hybrid retrieval** for recall and `evidence_bundle` alike (`quoth.retrieval`): BGE-M3
-  cosine fused by reciprocal rank with the snapshot's BM25 and trigram lists and the notes the
+- **Hybrid retrieval, opt-in** (`--retrieval hybrid`; the default stays `dense`, cosine
+  only) for recall and `evidence_bundle` alike (`quoth.retrieval`): BGE-M3 cosine fused by reciprocal rank with the snapshot's BM25 and trigram lists and the notes the
   query names (title, alias or path), so exact names and paths are found. The gate still
   judges each hit's real cosine; a lexical-only hit below the floor passes only when the query
-  names its note (gate reason `name`). `--retrieval dense` (sidecar, `quoth mcp`, `eval run`)
-  keeps the cosine-only ranking for comparison.
+  names its note (gate reason `name`). It is not the default: on the golden sets the
+  equal-weight fusion lets the three keyword lists outvote the dense one (golden-v1 hit@10
+  0.47 hybrid vs 0.90 dense, golden-v3 0.76 vs 0.93), worst on Russian questions. It stays
+  opt-in until the fusion is reweighted and measured.
 - **Per-note diversity**: recall serves at most 1 hit per note before any repeat, an explicit
   bundle at most 2; an excerpt repeated at another path is returned once.
 - **`evidence_bundle` gains `path_prefix`** (a folder pre-filter, for names shared across

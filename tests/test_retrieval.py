@@ -81,7 +81,7 @@ def snap(vault, tmp_path):
 
 @pytest.fixture
 def evidence(snap, vault):
-    ev = ReadOnlyEvidence(ServingSnapshot(str(snap)), vault=vault)
+    ev = ReadOnlyEvidence(ServingSnapshot(str(snap)), vault=vault, retrieval="hybrid")
     yield ev
     ev.snapshot.close()
 
@@ -287,7 +287,7 @@ def test_live_check_hashes_only_when_size_matches_but_mtime_does_not(tmp_path):
 
 
 def test_recall_block_dates_the_snapshot_and_marks_a_changed_note(snap, vault, tmp_path):
-    ev = ReadOnlyEvidence(ServingSnapshot(str(snap)), vault=vault)
+    ev = ReadOnlyEvidence(ServingSnapshot(str(snap)), vault=vault, retrieval="hybrid")
     app = sidecar.Quoth(ledger_path=tmp_path / "l.db", evidence=ev, model="hash-ngram", gate=Gate())
     try:
         (vault / "PROJECTS/Garden.md").write_text("# Garden\n\nMoved everything north.\n", encoding="utf-8")
@@ -328,7 +328,7 @@ def test_contract_reads_what_the_index_writes(tmp_path, vault):
 
 @pytest.fixture
 def app(snap, vault, tmp_path):
-    ev = ReadOnlyEvidence(ServingSnapshot(str(snap)), vault=vault)
+    ev = ReadOnlyEvidence(ServingSnapshot(str(snap)), vault=vault, retrieval="hybrid")
     a = sidecar.Quoth(ledger_path=tmp_path / "l.db", evidence=ev, model="hash-ngram", gate=Gate())
     yield a
     a.close()

@@ -106,8 +106,8 @@ prefetch candidates (`metrics`) and the explicit bundle (`explicit`).
 
 ### Retrieval modes
 
-`--retrieval hybrid` (default, as the sidecar serves) or `--retrieval dense` (cosine only,
-the 0.16 ranking) sets how vault hits are ranked, for prefetch and the explicit bundle alike
+`--retrieval dense` (default, as the sidecar serves: cosine only) or `--retrieval hybrid`
+(opt-in fusion with the keyword lists) sets how vault hits are ranked, for prefetch and the explicit bundle alike
 ([HERMES.md](HERMES.md#vault-retrieval)). Compare the two on one set:
 
 ```bash

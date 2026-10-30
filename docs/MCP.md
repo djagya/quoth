@@ -11,7 +11,7 @@ quoth mcp --db /path/to/snapshot.db
 |---|---|---|
 | `--db PATH` | `$QUOTH_HOME/memory.db` | the snapshot to serve: a database file, or a symlink pointing at one |
 | `--vault DIR` | off | the live vault root, read-only: each hit says whether its note changed since indexing (`live`) |
-| `--retrieval hybrid\|dense` | `hybrid` | vault ranking (below) |
+| `--retrieval hybrid\|dense` | `dense` | vault ranking (below) |
 
 The database is opened with SQLite `mode=ro` and `query_only=ON` and its schema is
 validated at startup. A plain file is served as it is (handy for a development database).
@@ -24,7 +24,8 @@ background, so the stdio handshake never waits for it.
 
 ## Tool: `evidence_bundle`
 
-Hybrid retrieval over the snapshot's current chunks: BGE-M3 cosine, BM25 and trigram
+Retrieval over the snapshot's current chunks, by BGE-M3 cosine (default) or, with
+`--retrieval hybrid`, by BGE-M3 cosine, BM25 and trigram
 full-text lists and the notes the query names, fused by reciprocal rank (the same ranking as
 the sidecar's recall: [HERMES.md](HERMES.md#vault-retrieval)); `--retrieval dense` ranks by
 cosine alone. It returns bounded excerpts with provenance, not an answer. At most 2 hits of

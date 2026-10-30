@@ -43,7 +43,10 @@ MAX_WIDEN = 20            # most vault hits a rerank widen may score (= MAX_CAND
 # How vault hits are ranked, for prefetch and for `evidence_bundle` alike: "hybrid" fuses the
 # dense list (bge-m3 cosine) with the snapshot's BM25 (unicode61) and trigram lists and the
 # notes the query names, by reciprocal rank (RRF); "dense" ranks by cosine alone.
-RETRIEVAL = "hybrid"
+# Dense is the default: on the golden sets equal-weight RRF lets the three keyword lists
+# outvote the dense list (golden-v1 hit@10 0.47 hybrid vs 0.90 dense), so hybrid stays
+# opt-in until its fusion is reweighted and measured.
+RETRIEVAL = "dense"
 RETRIEVAL_MODES = ("hybrid", "dense")
 HYBRID_DEPTH = 50         # entries per list (dense, bm25, trigram, named) fused by RRF
 EVIDENCE_K = 10           # `evidence_bundle` hits when the caller gives no k
