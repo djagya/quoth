@@ -79,6 +79,8 @@ def compare(a: Receipt | dict, b: Receipt | dict, tolerances: dict | None = None
     problems = []
     if tol.get("require_same_set", True) and a.get("set", {}).get("sha256") != b.get("set", {}).get("sha256"):
         problems.append("different_set")
+    if (a.get("set") or {}).get("split") != (b.get("set") or {}).get("split"):
+        problems.append("different_split")
     if b.get("status", "ok") != "ok":
         problems.append(f"b_status:{b.get('status')}")
     if not b.get("metrics"):

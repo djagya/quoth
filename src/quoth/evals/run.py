@@ -251,8 +251,22 @@ def _resolved_sources(row: dict, resolved: dict | None) -> list | None:
     if paths is None:
         return None
     mapping = dict(zip(vault_paths(row), paths))
-    return [{"store": s["store"], "match": {"path": mapping.get(s["match"]["path"], s["match"]["path"])}}
-            if s["store"] == "vault" and "path" in s["match"] else s for s in row["expect"]["sources"]]
+    return [_rewrite(s, mapping) for s in row["expect"]["sources"]]
+
+
+def _rewrite(src: dict, mapping: dict) -> dict:
+    if src["store"] == "vault" and "path" in src["match"]:
+        return {"store": "vault", "match": {"path": mapping.get(src["match"]["path"], src["match"]["path"])}}
+    return src
+
+
+def _resolved_groups(row: dict, resolved: dict | None) -> list | None:
+    """The row's all-of groups with drifted vault paths rewritten as its sources are."""
+    groups = row["expect"].get("groups")
+    if not groups or resolved is None or row["id"] not in resolved or resolved[row["id"]] is None:
+        return groups
+    mapping = dict(zip(vault_paths(row), resolved[row["id"]]))
+    return [{"name": g["name"], "any_of": [_rewrite(s, mapping) for s in g["any_of"]]} for g in groups]
 
 
 # ---------------------------------------------------------------- run
@@ -261,7 +275,9 @@ def _guard_no_text(receipt: dict, evalset: EvalSet) -> None:
     """Fail closed if any question, path or hint of the set appears in the receipt."""
     blob = json.dumps(receipt, ensure_ascii=False)
     for row in evalset.rows:
-        needles = [row["question"], *vault_paths(row), row["expect"].get("answer_hint") or ""]
+        negatives = [s["match"]["path"] for s in row["expect"].get("negatives", [])
+                     if s["store"] == "vault" and "path" in s["match"]]
+        needles = [row["question"], *vault_paths(row), *negatives, row["expect"].get("answer_hint") or ""]
         needles += [t["text"] for t in row.get("context", [])]
         for needle in needles:
             if needle and len(needle) >= 6 and needle in blob:
@@ -317,7 +333,9 @@ def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATE
             trace: list | None = None) -> tuple[Receipt, list | None]:
     """Run every row through `target.prefetch` (dry run) and, with a vault, the explicit
     `evidence_bundle` (`target.evidence`). Returns (receipt, per-row detail|None); with
-    `trace` (a list), one `trace_line` per row is appended to it."""
+    `trace` (a list), one `trace_line` per row is appended to it. Only reviewed rows are
+    scored (`EvalSet.select`: drafts and rejected rows are left out), of the set's split."""
+    evalset = evalset.select(evalset.split) if not evalset.skipped else evalset
     target.prepare()
     if warmup:
         target.prefetch({"query": WARMUP_QUERY, "dry_run": True, "k_candidates": k_candidates})
@@ -374,7 +392,7 @@ def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATE
                 sources = [s for s in row["expect"]["sources"] if s["store"] != "vault"]
                 if not sources and not row["expect"]["abstain"]:
                     continue
-            obs = M.observe(row, candidates, sources=sources)
+            obs = M.observe(row, candidates, sources=sources, groups=_resolved_groups(row, resolved))
             observations.append(obs)
             if explicit is not None:
                 explicit_obs.append(explicit_observation(row, explicit.get("hits", []), sources))
@@ -390,7 +408,8 @@ def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATE
         "code": {"package": "quoth", "version": __version__},
         "set": {"schema": evalset.manifest.get("schema"), "sha256": evalset.sha256,
                 "rows": len(evalset.rows), "privacy": evalset.manifest.get("privacy"),
-                "fixture": evalset.manifest.get("fixture")},
+                "fixture": evalset.manifest.get("fixture"), "split": evalset.split,
+                "skipped": evalset.skipped},
         "config": {**config, "k_candidates": k_candidates, "gold_drift": gold_drift,
                    "context": "ignored", "asked_at": "ignored"},
         "status": status,

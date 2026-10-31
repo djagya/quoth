@@ -10,14 +10,22 @@ margin is wide. Both receipts score the same rows, so the tests compare row by r
   Monte Carlo sample, so a result is reproducible.
 
 Both return counts and a p-value only; nothing here sees question text.
+
+`mcnemar` also reports `mde`: the smallest change in the rate a set of this size detects
+with 80% power at alpha 0.05, given the share of rows that differ between the two runs
+(Connor's approximation; at least `MIN_DISCORDANT` is assumed, so two identical runs do not
+claim a precision they never showed).
 """
 from __future__ import annotations
 
 from itertools import product
-from math import comb
+from math import comb, sqrt
 import random
 
 EXACT_MAX = 16
+Z_ALPHA = 1.959964   # two-sided 0.05
+Z_POWER = 0.841621   # 80% power
+MIN_DISCORDANT = 0.05
 SAMPLES = 20000
 SEED = 1729
 
@@ -35,14 +43,30 @@ def binom_two_sided(k: int, n: int) -> float:
     return min(1.0, 2 * tail)
 
 
+def mde(n: int, discordant: float) -> float | None:
+    """Smallest detectable difference of two paired rates over `n` rows when a share
+    `discordant` of rows differs (Connor 1987: n = (z_a sqrt(psi) + z_b sqrt(psi - d^2))^2 / d^2)."""
+    if n <= 0:
+        return None
+    psi = min(1.0, max(MIN_DISCORDANT, discordant))
+    lo, hi = 1e-6, sqrt(psi) - 1e-9
+    for _ in range(80):
+        d = (lo + hi) / 2
+        need = (Z_ALPHA * sqrt(psi) + Z_POWER * sqrt(max(psi - d * d, 0.0))) ** 2 / (d * d)
+        lo, hi = (lo, d) if need <= n else (d, hi)
+    return round(hi, 4) if hi < sqrt(psi) - 1e-6 else None
+
+
 def mcnemar(a: dict, b: dict) -> dict:
     """{id: bool} on each side. `gained`: false in A, true in B; `lost`: the reverse."""
     pairs = _pairs(a, b)
     gained = sum(1 for x, y in pairs if not x and y)
     lost = sum(1 for x, y in pairs if x and not y)
-    return {"test": "mcnemar_exact", "n": len(pairs), "a": sum(bool(x) for x, _ in pairs),
+    n = len(pairs)
+    return {"test": "mcnemar_exact", "n": n, "a": sum(bool(x) for x, _ in pairs),
             "b": sum(bool(y) for _, y in pairs), "gained": gained, "lost": lost,
-            "p": round(binom_two_sided(min(gained, lost), gained + lost), 4)}
+            "p": round(binom_two_sided(min(gained, lost), gained + lost), 4),
+            "mde": mde(n, (gained + lost) / n if n else 0.0)}
 
 
 def permutation(a: dict, b: dict, *, samples: int = SAMPLES, seed: int = SEED) -> dict:
@@ -80,7 +104,7 @@ def paired(a: dict, b: dict) -> dict:
     """Paired tests over the per-row `items` of two receipts, for every item map both have."""
     ia, ib = a.get("items") or {}, b.get("items") or {}
     out = {}
-    for name in ("vault_hit@5", "vault_hit@10", "injected_hit", "abstain_injected"):
+    for name in ("vault_hit@5", "vault_hit@10", "injected_hit", "abstain_injected", "all@10"):
         if name in ia and name in ib:
             out[name] = mcnemar(ia[name], ib[name])
     for name in ("vault_rank", "injected_rank"):
