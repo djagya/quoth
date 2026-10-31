@@ -16,8 +16,8 @@ Files live under ``<cache>/<repo>/`` with the embedder's cache (``QUOTH_MODEL_CA
 Nothing here is part of the index contract: no score is stored in a snapshot.
 `RerankService` loads the model off the request path and retries a failed load with backoff.
 The sidecar scores on its own rerank worker, apart from the evidence worker, and a turn whose
-scores are not ready in time keeps the cosine gate. The reranker scores the same excerpt the
-recall block injects (`relevance.vault_text`).
+scores are not ready in time keeps the cosine gate. The reranker reads a vault hit's note
+title, heading path and chunk text (`relevance.rerank_text`), bounded by PASSAGE_CHARS.
 """
 from __future__ import annotations
 
@@ -50,9 +50,9 @@ TOKENIZER_SHA256 = (
     ("special_tokens_map.json", "8c785abebea9ae3257b61681b4e6fd8365ceafde980c21970d001e834cf10835"),
     ("config.json", "122e922dcfed6503c8721e6fe1daf090340c3d95ca7f3aa3a72730b321a51cfd"),
 )
-# Query + passage tokens per pair (longest first truncation). The injected snippet
-# (recall_defaults.VAULT_SNIPPET characters) fits with a query, and 3 pairs stay near half a
-# second on 6 threads.
+# Query + passage tokens per pair (longest first truncation): a query plus the title,
+# heading and up to PASSAGE_CHARS of chunk text. 10 pairs take about 1.5 s on 4 cores, 5
+# about 0.75 s, so a widen past 5 needs a longer --rerank-budget.
 MAX_TOKENS = RERANK_MAX_TOKENS
 # Passage characters handed to the tokenizer (bounded work before truncation).
 PASSAGE_CHARS = 1200

@@ -14,9 +14,11 @@ index call:
   the rerank thresholds decide those hits instead of the cosine ones; where it is missing
   (model loading or unavailable, over its time budget) the cosine gate applies.
 
-What is judged is what is injected: a vault hit's lexical coverage and rerank score are
-taken on `vault_text`, the same whitespace-folded, VAULT_SNIPPET-character excerpt the recall
-block shows. A turn judges every candidate in its pool and injects the best that pass
+A vault hit's lexical coverage is taken on `vault_text`, the same whitespace-folded,
+VAULT_SNIPPET-character excerpt the recall block shows. The reranker reads more
+(`rerank_text`): the note title and heading path, as the embedder does, then the chunk text
+up to the reranker's passage bound. Scored on the bare excerpt it ranked below cosine order;
+with the context it ranks above it. A turn judges every candidate in its pool and injects the best that pass
 (`vault_pick`), so a dropped slot is refilled by the next candidate.
 
 `Gate()` has every threshold off (every item passes with reason ``off``); `default_gate()`
@@ -27,6 +29,7 @@ offline behaves the same on the sidecar.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
+from pathlib import PurePosixPath
 import re
 import unicodedata
 
@@ -115,6 +118,16 @@ def vault_text(hit: dict) -> str:
     """The excerpt of a vault hit the recall block injects, and the text the gate and the
     reranker judge: whitespace folded, cut to VAULT_SNIPPET characters."""
     return " ".join(str(hit.get("text") or "").split())[:D.VAULT_SNIPPET]
+
+
+def rerank_text(hit: dict) -> str:
+    """What the cross-encoder reads of a vault hit: `title — heading path`, then the chunk
+    text (no aliases, which pull every chunk of a note toward its topic). `rerank.passage`
+    folds whitespace and bounds it."""
+    title = PurePosixPath(str(hit.get("path") or "")).stem
+    heading = str(hit.get("heading_path") or "")
+    head = f"{title} — {heading}" if heading and heading != title else title
+    return f"{head}\n{hit.get('text') or ''}" if head else str(hit.get("text") or "")
 
 
 @dataclass(frozen=True)

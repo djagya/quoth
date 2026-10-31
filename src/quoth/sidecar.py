@@ -784,7 +784,7 @@ class Quoth:
         model = rr.model()
         if model is None:  # still loading in the background, or unavailable
             return vault, claim_scores, rr.state, pair_ms
-        texts = [relevance.vault_text(h) for h in hits[:max(depth, k_rerank)]]  # what is injected
+        texts = [relevance.rerank_text(h) for h in hits[:max(depth, k_rerank)]]  # title, heading, chunk
         live = min(depth, len(texts))
         cancel, live_ready = threading.Event(), Future()
         with self._rerank_lock:
