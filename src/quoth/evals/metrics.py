@@ -135,10 +135,23 @@ def latency(samples: list[dict]) -> dict:
     return out
 
 
+def _first(ranks) -> int | None:
+    return min((r for r in ranks if r is not None and r <= MRR_CUTOFF), default=None)
+
+
 def items(obs: list[dict]) -> dict:
-    """Ids only: per-row vault hit@10 (the gate's lost-gold basis) and injected hit."""
+    """Ids only, the pairs of `eval compare`'s paired tests: per-row vault hit@5 and hit@10
+    (hit@10 is the gate's lost-gold basis), the first vault rank (None past rank 10), injected
+    hit and the first expected source's position in the block, and whether an abstain row got
+    anything injected."""
+    vault = [o for o in obs if o["stores"]["vault"]["expected"]]
     return {
+        "vault_hit@5": {o["id"]: any(r is not None and r <= 5 for r in o["stores"]["vault"]["ranks"])
+                        for o in vault},
         "vault_hit@10": {o["id"]: any(r is not None and r <= 10 for r in o["stores"]["vault"]["ranks"])
-                         for o in obs if o["stores"]["vault"]["expected"]},
+                         for o in vault},
+        "vault_rank": {o["id"]: _first(o["stores"]["vault"]["ranks"]) for o in vault},
         "injected_hit": {o["id"]: o["block_rank"] is not None for o in obs if o["answerable"]},
+        "injected_rank": {o["id"]: o["block_rank"] for o in obs if o["answerable"]},
+        "abstain_injected": {o["id"]: o["block"] > 0 for o in obs if o["abstain"]},
     }

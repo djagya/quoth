@@ -137,3 +137,12 @@ def test_modules_read_their_numbers_from_recall_defaults():
     assert episodes.EMBED_TICK_SECONDS == D.EPISODES_TICK_SECONDS
     assert prefetch_log.DEFAULT_DAYS == D.PREFETCH_LOG_DAYS
     assert set(D.GATE) == {f.name for f in __import__("dataclasses").fields(relevance.Gate)}
+
+
+def test_retrieval_docstring_names_the_default():
+    """The module docstring of `quoth.retrieval` names the serving default, not the opt-in."""
+    import quoth.retrieval as R
+    doc = R.__doc__ or ""
+    assert f"**{D.RETRIEVAL}** (default, `recall_defaults.RETRIEVAL`)" in doc
+    other = {"dense": "hybrid", "hybrid": "dense"}[D.RETRIEVAL]
+    assert f"**{other}** (default" not in doc

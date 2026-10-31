@@ -1,12 +1,13 @@
 """The serving path's one vault retrieval: prefetch's candidate pool and `evidence_bundle`
 both rank through `retrieve`.
 
-- **hybrid** (default, `recall_defaults.RETRIEVAL`): reciprocal-rank fusion (RRF, k=60) of
-  the dense list (bge-m3 cosine over the admitted snapshot's matrix), the BM25 (unicode61)
-  and trigram FTS5 lists (`search.lexical_lists`) and the *named* list: the chunks of notes
-  the query names exactly (title, frontmatter alias or vault path, `named_paths`), in
-  cosine order. Exact names and paths a dense model blurs are found by the lexical lists.
-- **dense**: cosine order alone (the 0.16 ranking), for comparison in evals.
+- **dense** (default, `recall_defaults.RETRIEVAL`): bge-m3 cosine order over the admitted
+  snapshot's matrix.
+- **hybrid** (opt-in): reciprocal-rank fusion (RRF, k=60) of the dense list, the BM25
+  (unicode61) and trigram FTS5 lists (`search.lexical_lists`) and the *named* list: the
+  chunks of notes the query names exactly (title, frontmatter alias or vault path,
+  `named_paths`), in cosine order. On the golden sets equal-weight fusion lets the keyword
+  lists outvote dense, so it stays off by default.
 
 Every hit keeps its real cosine (computed from the matrix for lexical-only hits), so the
 relevance gate still judges cosine. Filters (`Filter`: a folder prefix, excluded recall
