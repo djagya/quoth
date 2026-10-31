@@ -8,6 +8,12 @@ Tolerances are a JSON document; every metric is addressed by a dotted path into 
 receipt (``metrics.overall.stores.vault.hit@10``). Rules per metric: ``max_drop``
 (higher is better), ``max_rise`` (lower is better), ``max_rise_ratio`` (relative rise,
 for latency). A metric missing on either side is reported, never failed.
+
+`paired` adds row-by-row significance tests over the receipts' per-row items
+(`stats.paired`: exact McNemar for hits, a sign-flip permutation test for reciprocal ranks).
+They inform and never change the exit code: with `paired_alpha` (default 0.05) each test is
+marked `significant` and its `direction` (`better`, `worse`, `same`). For
+`abstain_injected` fewer injected rows is better.
 """
 from __future__ import annotations
 
@@ -15,11 +21,13 @@ import json
 from pathlib import Path
 
 from .run import Receipt
+from .stats import paired
 
 DEFAULT_TOLERANCES = {
     "schema": "quoth-eval-tolerances/v1",
     "require_same_set": True,
     "max_lost_gold": 0,
+    "paired_alpha": 0.05,
     "metrics": {
         # The nightly gate's source-retrieval metrics, on the vault store's candidates.
         "metrics.overall.stores.vault.hit@5": {"max_drop": 0.0},
@@ -107,4 +115,18 @@ def compare(a: Receipt | dict, b: Receipt | dict, tolerances: dict | None = None
     return {"schema": "quoth-eval-compare/v1", "result": result, "exit": code, "problems": problems,
             "lost_gold": lost, "gained_gold": gained, "gold_drift": {"a": a.get("gold_drift"),
                                                                     "b": b.get("gold_drift")},
-            "checks": checks}
+            "checks": checks, "paired": _paired(a, b, float(tol.get("paired_alpha", 0.05)))}
+
+
+def _paired(a: dict, b: dict, alpha: float) -> dict:
+    out = paired(a, b)
+    for name, test in out.items():
+        if "delta" in test:
+            change = test["delta"]
+        else:
+            change = test["gained"] - test["lost"]
+        if name == "abstain_injected":
+            change = -change
+        test["significant"] = test["p"] < alpha
+        test["direction"] = "better" if change > 0 else "worse" if change < 0 else "same"
+    return out
