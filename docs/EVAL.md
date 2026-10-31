@@ -179,7 +179,9 @@ gate scores with the same candidates and matching.
  "metrics": {"overall", "by_kind", "by_origin", "by_lang"}, "explicit": {"calls", "rows", "hit@1", "hit@3",
              "hit@5", "hit@10", "recall@10", "repeat_rate", "changed_hits"},
  "latency_ms": {}, "statuses": {},
- "items": {"vault_hit@10": {"<id>": true}, "injected_hit": {"<id>": false}},
+ "items": {"vault_hit@5": {"<id>": true}, "vault_hit@10": {"<id>": true}, "vault_rank": {"<id>": 2},
+           "injected_hit": {"<id>": false}, "injected_rank": {"<id>": null},
+           "abstain_injected": {"<id>": true}},
  "candidates": {"schema": "quoth-eval-candidates/v1", "rows": {"<id>": {
    "abstain": false, "answerable": true, "has_stale": false,
    "stores": {"vault": {"expected": 1, "items": [
@@ -234,6 +236,20 @@ text. stderr reports how many rows matched and how many oracle ids the run did n
 −0.02, injected hit and MRR −0.02, injected precision −0.05, abstain_nonempty +0.05,
 stale_leak +0, claims hit@5 −0.02, lanes hit@5 −0.05, wall p95 +50 %). Lost gold = ids with
 `vault_hit@10` true in A and false in B.
+
+**Paired tests.** Both receipts score the same rows, so `compare` also tests row by row over
+the receipts' `items` (`quoth.evals.stats`) and reports them under `paired`:
+
+| Test | Items | Method |
+|---|---|---|
+| `vault_hit@5`, `vault_hit@10`, `injected_hit` | per-row hit | exact McNemar: only rows that differ (`gained`, `lost`) count |
+| `abstain_injected` | abstain rows that got an injection | exact McNemar; fewer is better |
+| `vault_rr`, `injected_rr` | reciprocal rank of the first vault hit (`vault_rank`) / block position (`injected_rank`) | sign-flip permutation test on the mean paired difference: exact up to 16 differing rows, else 20,000 seeded samples |
+
+Each test carries `p`, `significant` (`p < paired_alpha`, default 0.05, a tolerance-file
+key) and `direction` (`better`, `worse`, `same`). They inform and never change the exit
+code: the tolerances still decide. On a 50-row set one row is 2 points, so a 2–4 point
+difference with `significant: false` is noise as far as the set can tell.
 
 | Exit | `eval run` | `eval compare` | `eval validate` |
 |---|---|---|---|
