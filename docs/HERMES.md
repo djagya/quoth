@@ -362,7 +362,7 @@ Paths default under `$QUOTH_HOME`; the Hermes `state.db` under `$HERMES_HOME`.
 | `--vault-lexical-rescue`, `--claims-min-cosine`, `--claims-min-lexical` | off | further relevance-gate rules (`off` turns any gate rule off) |
 | `--rerank-model NAME` | off | cross-encoder reranker |
 | `--rerank-budget S` | 0.8 | seconds a turn's reranking may take |
-| `--rerank-max-tokens N` | 192 | query + passage tokens per pair |
+| `--rerank-max-tokens N` | 512 | query + passage tokens per pair (title, heading, chunk) |
 | `--rerank-claims` | off | also score the claim pool |
 | `--vault-min-rerank`, `--vault-max-rerank-gap`, `--vault-rerank-widen`, `--claims-min-rerank` | off | rerank rules (need `--rerank-model`) |
 

@@ -799,3 +799,24 @@ def test_sidecar_health_shows_the_reranker_retry(tmp_path, state_db):
     finally:
         app.close()
     assert svc._stop.is_set()  # closing the sidecar stops the retry loop
+
+
+def test_reranker_reads_title_heading_and_the_whole_chunk(tmp_path, state_db):
+    """The cross-encoder judges a vault hit with its note title and heading path, as the
+    embedder does, and past the 360-character excerpt the block injects."""
+    long_text = "Feed the sourdough starter at 1:5:5. " + "Keep it warm and wait for bubbles. " * 20
+    hits = [{"locator": "Bread/Sourdough.md:3-9", "path": "Bread/Sourdough.md", "heading_path": "Feeding",
+             "text": long_text, "note_date": None, "cosine": 0.71},
+            {"locator": "Sourdough.md:1-2", "path": "Sourdough.md", "heading_path": "Sourdough",
+             "text": "Starter notes.", "note_date": None, "cosine": 0.6}]
+    model = _Fixed({})
+    app = _app(tmp_path, state_db, Gate(vault_min_rerank=0.1), model=model, hits=hits)
+    try:
+        app.prefetch({"query": QUERY, "dry_run": True})
+        app.wait_idle()
+    finally:
+        app.close()
+    read = [c for c in model.calls if c != "warmup"]
+    assert read[0] == f"Sourdough — Feeding\n{long_text}" and len(read[0]) > relevance.D.VAULT_SNIPPET
+    assert read[1] == "Sourdough\nStarter notes."  # a heading equal to the title is not repeated
+    assert relevance.rerank_text({"text": "x"}) == "x"

@@ -3,6 +3,19 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
+## Unreleased
+
+### Recall
+
+- **The reranker reads the note title, heading path and chunk text** (up to 1,200
+  characters), not only the 360-character excerpt the block injects; `--rerank-max-tokens`
+  defaults to 512 (was 192). On a full real-vault snapshot, reranking the bare excerpt ranked
+  the gold note into the top 3 less often than cosine order (golden-v1 0.714 vs 0.755,
+  golden-v3 0.648 vs 0.833); with the context, more often (reranking the top 5: 0.837 and
+  0.870). Each set gains 3 rows, not yet significant (exact McNemar p 0.51 and 0.38), so rerank
+  rules stay opt-in. Score-only serving (a reranker without rules) is unaffected. Cost: about
+  0.75 s for 5 pairs on 4 cores, so a rule needs a sweep on the serving machine first.
+
 ## 0.17.1 — one hit per note in the prefetch pool, nightly self-check fix
 
 No index change: 0.17.0 snapshots keep serving, no rebuild. Install the release and restart
