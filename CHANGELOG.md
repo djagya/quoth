@@ -3,6 +3,32 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
+## Unreleased
+
+### Evals
+
+- **Eval set v2.** Optional row fields, so every v1 row stays valid:
+  - all-of evidence `groups` for questions that need several notes;
+  - judged look-alike `negatives`;
+  - `split` (dev/test) and `cluster`;
+  - `hops`;
+  - `abstain_reason` (`no_memory_needed`, `not_in_vault`, `false_premise`, `near_miss`);
+  - label `provenance` with a review state (drafts and rejected rows are not scored);
+  - `paraphrase_of`.
+
+  Receipts add `groups.all@k`, `group_recall@10`, `injected_all_rate`, `negative_leak_rate`,
+  breakdowns by split, abstain reason and hops, and 95% Wilson intervals of the headline
+  rates (`metrics.ci95`). `eval run --split` scores one split.
+- **Suites** (`quoth eval suite validate|run|compare`): one file lists sets with a role
+  (`smoke`, `regression`, `quality`, `tune`), so public and personal sets run the same way on
+  one target. A quality set fails a comparison only when a paired test is significantly
+  worse. `eval compare`'s McNemar tests report `mde`, the smallest change the set can detect.
+- **A portable no-memory set** (`eval/sets/no-memory`, 120 rows, English and Russian):
+  messages that need no recall, for the false-injection rate on any vault. On a full
+  real-vault snapshot, prefetch injected vault excerpts into 41% of them (95% interval 32–50%),
+  mostly short conversational turns: 11 of 12 thanks, 13 of 20 greetings, 8 of 10 questions
+  about the assistant, but 1 of 24 general-knowledge questions.
+
 ## 0.17.1 — one hit per note in the prefetch pool, nightly self-check fix
 
 No index change: 0.17.0 snapshots keep serving, no rebuild. Install the release and restart

@@ -32,11 +32,14 @@ def matches(item: dict, store: str, src: dict) -> bool:
     return value.casefold() in text  # claim_text_contains / text_contains
 
 
-def observe(row: dict, candidates: dict, *, sources: list | None = None) -> dict:
-    """Content-free per-row observation: ranks, injected matches, stale leaks."""
+def observe(row: dict, candidates: dict, *, sources: list | None = None, groups: list | None = None) -> dict:
+    """Content-free per-row observation: ranks, injected matches, stale and negative leaks,
+    and for all-of rows the first vault rank and injection of each group."""
     expect = row["expect"]
     sources = expect["sources"] if sources is None else sources
+    groups = expect.get("groups") if groups is None else groups
     stale = expect.get("stale", [])
+    negatives = expect.get("negatives", [])
     stores = {}
     for store in STORES:
         items = candidates.get(store) or []
@@ -48,15 +51,27 @@ def observe(row: dict, candidates: dict, *, sources: list | None = None) -> dict
         injected = [it for it in items if it.get("injected")]
         hit_injected = [it for it in injected if any(matches(it, store, s) for s in wanted)]
         stale_injected = [it for it in injected if any(matches(it, store, s) for s in stale)]
+        negative_injected = [it for it in injected if any(matches(it, store, s) for s in negatives)]
         stores[store] = {"expected": len(wanted), "ranks": first, "candidates": len(items),
                          "injected": len(injected), "injected_matched": len(hit_injected),
-                         "stale_injected": len(stale_injected)}
+                         "stale_injected": len(stale_injected), "negative_injected": len(negative_injected)}
     block = [(store, it) for store in BLOCK_ORDER for it in (candidates.get(store) or []) if it.get("injected")]
     block_rank = next((i for i, (store, it) in enumerate(block, 1)
                        if any(matches(it, store, s) for s in sources)), None)
+    vault_items = candidates.get("vault") or []
+    group_obs = None
+    if groups:
+        group_obs = []
+        for g in groups:
+            ranks = [next((i for i, it in enumerate(vault_items, 1) if matches(it, "vault", s)), None)
+                     for s in g["any_of"] if s["store"] == "vault"]
+            group_obs.append({"rank": min((r for r in ranks if r is not None), default=None),
+                              "injected": any(any(matches(it, st, s) for s in g["any_of"]) for st, it in block)})
     return {"id": row["id"], "kind": row["kind"], "origin": row["origin"], "lang": row["lang"],
+            "split": row.get("split"), "abstain_reason": row.get("abstain_reason"), "hops": row.get("hops"),
             "abstain": bool(expect["abstain"]), "answerable": bool(sources),
-            "has_stale": bool(stale), "stores": stores, "block": len(block), "block_rank": block_rank}
+            "has_stale": bool(stale), "has_negatives": bool(negatives), "groups": group_obs,
+            "stores": stores, "block": len(block), "block_rank": block_rank}
 
 
 def _mean(values) -> float | None:
@@ -86,6 +101,21 @@ def block(obs: list[dict]) -> dict:
         "stale_leak_items": sum(s["stale_injected"] for o in stale for s in o["stores"].values()),
         "stores": {},
     }
+    negative = [o for o in obs if o.get("has_negatives")]
+    if negative:
+        # Rows with judged look-alikes where one was injected (lower is better).
+        out["negative_leak_rate"] = _mean(any(s["negative_injected"] for s in o["stores"].values())
+                                          for o in negative)
+    grouped = [o for o in obs if o.get("groups")]
+    if grouped:
+        # All-of rows: every group needed. `all@k` every group's vault rank within k;
+        # `group_recall@10` the share of groups found; `injected_all_rate` every group injected.
+        out["groups"] = {"n": len(grouped),
+                         **{f"all@{k}": _mean(all(g["rank"] is not None and g["rank"] <= k for g in o["groups"])
+                                              for o in grouped) for k in (5, 10)},
+                         "group_recall@10": _mean(sum(g["rank"] is not None and g["rank"] <= 10 for g in o["groups"])
+                                                  / len(o["groups"]) for o in grouped),
+                         "injected_all_rate": _mean(all(g["injected"] for g in o["groups"]) for o in grouped)}
     for store in STORES:
         rows = [o for o in obs if o["stores"][store]["expected"]]
         injected_rows = [o for o in obs if o["stores"][store]["injected"]]
@@ -110,11 +140,43 @@ def block(obs: list[dict]) -> dict:
     return out
 
 
+# Dimensions every receipt breaks down by, and v2 ones it adds when any row sets them.
+DIMS = ("kind", "origin", "lang")
+OPTIONAL_DIMS = ("split", "abstain_reason", "hops")
+Z95 = 1.959964
+
+
+def wilson(successes: int, n: int, z: float = Z95) -> list | None:
+    """95% Wilson score interval of a rate (sound at small n and near 0 or 1)."""
+    if n == 0:
+        return None
+    p = successes / n
+    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+    return [round(max(0.0, centre - half), 4), round(min(1.0, centre + half), 4)]
+
+
+def intervals(obs: list[dict]) -> dict:
+    """Wilson intervals of the headline rates: what a set of this size can tell apart."""
+    vault = [o for o in obs if o["stores"]["vault"]["expected"]]
+    answerable = [o for o in obs if o["answerable"]]
+    abstain = [o for o in obs if o["abstain"]]
+    hit = lambda o, k: any(r is not None and r <= k for r in o["stores"]["vault"]["ranks"])
+    return {"vault.hit@5": wilson(sum(hit(o, 5) for o in vault), len(vault)),
+            "vault.hit@10": wilson(sum(hit(o, 10) for o in vault), len(vault)),
+            "injected_hit_rate": wilson(sum(o["block_rank"] is not None for o in answerable), len(answerable)),
+            "abstain_nonempty_rate": wilson(sum(o["block"] > 0 for o in abstain), len(abstain))}
+
+
 def aggregate(obs: list[dict]) -> dict:
-    out = {"overall": block(obs)}
-    for dim in ("kind", "origin", "lang"):
+    out = {"overall": block(obs), "ci95": intervals(obs)}
+    for dim in DIMS:
         out[f"by_{dim}"] = {value: block([o for o in obs if o[dim] == value])
                             for value in sorted({o[dim] for o in obs})}
+    for dim in OPTIONAL_DIMS:
+        values = sorted({o.get(dim) for o in obs if o.get(dim) is not None}, key=str)
+        if values:
+            out[f"by_{dim}"] = {str(v): block([o for o in obs if o.get(dim) == v]) for v in values}
     return out
 
 
@@ -154,4 +216,6 @@ def items(obs: list[dict]) -> dict:
         "injected_hit": {o["id"]: o["block_rank"] is not None for o in obs if o["answerable"]},
         "injected_rank": {o["id"]: o["block_rank"] for o in obs if o["answerable"]},
         "abstain_injected": {o["id"]: o["block"] > 0 for o in obs if o["abstain"]},
+        **({"all@10": {o["id"]: all(g["rank"] is not None and g["rank"] <= 10 for g in o["groups"])
+                       for o in obs if o.get("groups")}} if any(o.get("groups") for o in obs) else {}),
     }
