@@ -1,6 +1,10 @@
-"""quoth eval set v1: JSONL rows plus a sibling manifest (see docs/EVAL.md).
+"""quoth eval sets: JSONL rows plus a sibling manifest (see docs/EVAL.md).
 
-Validation is plain Python (no jsonschema dependency); `eval/schema/evalset-v1.schema.json`
+v2 adds optional row fields to v1 (all-of evidence groups, judged negatives, dev/test
+splits, abstain reasons, label provenance, hop counts, paraphrase links); every v1 row is a
+valid v2 row and v1 manifests still load. `write_set` writes v2 manifests.
+
+Validation is plain Python (no jsonschema dependency); `eval/schema/evalset-v2.schema.json`
 describes the same contract for other tools, and a test keeps the two in step.
 """
 from __future__ import annotations
@@ -13,12 +17,24 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 
-SCHEMA = "quoth-evalset/v1"
+SCHEMA_V1 = "quoth-evalset/v1"
+SCHEMA = "quoth-evalset/v2"
+SCHEMAS = (SCHEMA_V1, SCHEMA)
 KINDS = ("fact", "preference", "person", "project_state", "decision", "temporal",
          "knowledge_update", "unanswerable", "episodic", "followup")
 ORIGINS = ("real_user", "assistant_query", "authored", "synthetic")
 STORES = ("vault", "claims", "owner", "assistant")
 PRIVACY = ("public", "private")
+SPLITS = ("dev", "test")
+# Why an abstain row should get nothing: no recall needed at all (chit-chat, general
+# knowledge, a pure task), plausible but absent from the stores, a premise the stores
+# contradict or lack, or a look-alike that must not be injected.
+ABSTAIN_REASONS = ("no_memory_needed", "not_in_vault", "false_premise", "near_miss")
+REVIEWS = ("accepted", "edited", "draft", "rejected")
+# Rows a run scores: drafts and rejected rows stay in the file for review, out of the numbers.
+SCORED_REVIEWS = ("accepted", "edited")
+PROVENANCE_KEYS = {"author", "created_at", "reviewed_by", "reviewed_at", "review", "mined_from"}
+MAX_HOPS = 4
 ROLES = ("user", "assistant")
 # match key -> stores it may be used with
 MATCH_KEYS = {
@@ -28,9 +44,10 @@ MATCH_KEYS = {
     "subject_key": ("claims",),
     "text_contains": STORES,
 }
-ROW_KEYS = {"id", "question", "lang", "asked_at", "context", "kind", "origin", "expect", "tags", "meta"}
+ROW_KEYS = {"id", "question", "lang", "asked_at", "context", "kind", "origin", "expect", "tags", "meta",
+            "split", "cluster", "hops", "abstain_reason", "provenance", "paraphrase_of"}
 REQUIRED_ROW_KEYS = {"id", "question", "lang", "kind", "origin", "expect"}
-EXPECT_KEYS = {"abstain", "sources", "stale", "answer_hint"}
+EXPECT_KEYS = {"abstain", "sources", "stale", "answer_hint", "groups", "negatives"}
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{1,8})?$")
 MAX_QUESTION = 2048
@@ -51,6 +68,17 @@ class EvalSet:
     sha256: str
     path: Path | None = None
     errors: list[str] = field(default_factory=list)
+    split: str | None = None   # the split `select` kept (None: every split)
+    skipped: int = 0           # draft or rejected rows `select` left out
+
+    def select(self, split: str | None = None) -> "EvalSet":
+        """The rows a run scores: reviewed rows (no draft or rejected), of one split when
+        given. Rows without a split belong to every split."""
+        if split is not None and split not in SPLITS:
+            raise ValueError("split must be dev or test")
+        keep = [r for r in self.rows if scored(r) and (split is None or r.get("split", split) == split)]
+        return EvalSet(rows=keep, manifest=self.manifest, sha256=self.sha256, path=self.path,
+                       split=split, skipped=sum(1 for r in self.rows if not scored(r)))
 
 
 def manifest_path(set_path: str | Path) -> Path:
@@ -143,7 +171,7 @@ def row_errors(row) -> list[str]:
         errors.append(f"{rid}: expect must be an object")
         return errors
     if set(expect) - EXPECT_KEYS or not {"abstain", "sources"} <= set(expect):
-        errors.append(f"{rid}: expect must have abstain, sources and only stale/answer_hint besides")
+        errors.append(f"{rid}: expect must have abstain, sources and only stale/answer_hint/groups/negatives besides")
     if not isinstance(expect.get("abstain"), bool):
         errors.append(f"{rid}: expect.abstain must be a boolean")
     errors += _source_errors(rid, "expect.sources", expect.get("sources"))
@@ -160,17 +188,112 @@ def row_errors(row) -> list[str]:
         errors.append(f"{rid}: unanswerable rows abstain")
     if row.get("kind") == "followup" and not row.get("context"):
         errors.append(f"{rid}: followup rows need context")
+    if "negatives" in expect:
+        errors += _source_errors(rid, "expect.negatives", expect["negatives"])
+    if "groups" in expect:
+        errors += _group_errors(rid, expect)
+    errors += _v2_row_errors(rid, row)
     return errors
 
 
-def counts(rows: list[dict]) -> dict:
-    return {
+def _key(src: dict) -> str:
+    return json.dumps(src, sort_keys=True, ensure_ascii=False)
+
+
+def _group_errors(rid: str, expect: dict) -> list[str]:
+    """All-of evidence: at least 2 named groups, each any-of sources; `sources` lists exactly
+    the groups' sources, so readers of v1 (the gate, `vault_paths`) see the any-of union."""
+    groups = expect["groups"]
+    if not isinstance(groups, list) or len(groups) < 2:
+        return [f"{rid}: expect.groups must list at least 2 groups"]
+    errors, names, union = [], set(), set()
+    for i, g in enumerate(groups):
+        tag = f"{rid}: expect.groups[{i}]"
+        if not isinstance(g, dict) or set(g) != {"name", "any_of"}:
+            errors.append(f"{tag} must be {{name, any_of}}")
+            continue
+        if not isinstance(g["name"], str) or not ID_RE.match(g["name"]) or g["name"] in names:
+            errors.append(f"{tag}.name must be a unique id-like string")
+        names.add(g["name"] if isinstance(g["name"], str) else "")
+        if not isinstance(g["any_of"], list) or not g["any_of"]:
+            errors.append(f"{tag}.any_of must be a non-empty list")
+            continue
+        sub = _source_errors(rid, f"expect.groups[{i}].any_of", g["any_of"])
+        errors += sub
+        if not sub:
+            union |= {_key(s) for s in g["any_of"]}
+    if not errors and isinstance(expect.get("sources"), list) and {_key(s) for s in expect["sources"]
+                                                                   if isinstance(s, dict)} != union:
+        errors.append(f"{rid}: expect.sources must list exactly the groups' sources")
+    return errors
+
+
+def _v2_row_errors(rid: str, row: dict) -> list[str]:
+    errors = []
+    if "split" in row and row["split"] not in SPLITS:
+        errors.append(f"{rid}: split must be dev or test")
+    if "cluster" in row and (not isinstance(row["cluster"], str) or not ID_RE.match(row["cluster"])):
+        errors.append(f"{rid}: cluster must be an id-like string")
+    if "hops" in row and (not isinstance(row["hops"], int) or isinstance(row["hops"], bool)
+                          or not 1 <= row["hops"] <= MAX_HOPS):
+        errors.append(f"{rid}: hops must be 1..{MAX_HOPS}")
+    if "paraphrase_of" in row and (not isinstance(row["paraphrase_of"], str)
+                                   or not ID_RE.match(row["paraphrase_of"]) or row["paraphrase_of"] == rid):
+        errors.append(f"{rid}: paraphrase_of must be another row's id")
+    expect = row.get("expect") if isinstance(row.get("expect"), dict) else {}
+    if "abstain_reason" in row:
+        if row["abstain_reason"] not in ABSTAIN_REASONS:
+            errors.append(f"{rid}: abstain_reason unknown")
+        elif expect.get("abstain") is not True:
+            errors.append(f"{rid}: abstain_reason is for abstain rows")
+    if "provenance" in row:
+        errors += _provenance_errors(rid, row["provenance"])
+    return errors
+
+
+def _provenance_errors(rid: str, prov) -> list[str]:
+    if not isinstance(prov, dict) or set(prov) - PROVENANCE_KEYS or "author" not in prov:
+        return [f"{rid}: provenance must be an object with author and only {sorted(PROVENANCE_KEYS - {'author'})}"]
+    errors = []
+    if not isinstance(prov["author"], str) or not prov["author"].strip():
+        errors.append(f"{rid}: provenance.author must be a non-empty string")
+    if "review" in prov and prov["review"] not in REVIEWS:
+        errors.append(f"{rid}: provenance.review must be one of {list(REVIEWS)}")
+    if "reviewed_by" in prov and (not isinstance(prov["reviewed_by"], list)
+                                  or any(not isinstance(x, str) or not x for x in prov["reviewed_by"])):
+        errors.append(f"{rid}: provenance.reviewed_by must be a list of strings")
+    for key in ("created_at", "reviewed_at"):
+        if key in prov and not _iso_ok(prov[key]):
+            errors.append(f"{rid}: provenance.{key} must be an ISO date or datetime")
+    if "mined_from" in prov and (not isinstance(prov["mined_from"], str) or not prov["mined_from"]):
+        errors.append(f"{rid}: provenance.mined_from must be a non-empty string")
+    return errors
+
+
+def review(row: dict) -> str:
+    """A row's review state; rows without provenance count as accepted."""
+    return (row.get("provenance") or {}).get("review", "accepted")
+
+
+def scored(row: dict) -> bool:
+    return review(row) in SCORED_REVIEWS
+
+
+def counts(rows: list[dict], schema: str = SCHEMA) -> dict:
+    out = {
         "kind": dict(sorted(Counter(r["kind"] for r in rows).items())),
         "origin": dict(sorted(Counter(r["origin"] for r in rows).items())),
         "lang": dict(sorted(Counter(r["lang"] for r in rows).items())),
         "abstain": {"true": sum(bool(r["expect"]["abstain"]) for r in rows),
                     "false": sum(not r["expect"]["abstain"] for r in rows)},
     }
+    if schema != SCHEMA_V1:
+        out["split"] = dict(sorted(Counter(r.get("split", "none") for r in rows).items()))
+        out["review"] = dict(sorted(Counter(review(r) for r in rows).items()))
+        out["groups"] = sum(1 for r in rows if r["expect"].get("groups"))
+        out["abstain_reason"] = dict(sorted(Counter(r["abstain_reason"] for r in rows
+                                                    if r.get("abstain_reason")).items()))
+    return out
 
 
 def build_manifest(rows: list[dict], data: bytes, *, privacy: str, fixture: str,
@@ -215,6 +338,10 @@ def _set_errors(rows: list[dict], privacy: str | None) -> list[str]:
         errors.append(f"duplicate ids {dup[:5]}")
     if not rows:
         errors.append("set is empty")
+    known = {i for i in ids if isinstance(i, str)}
+    for r in rows:
+        if isinstance(r, dict) and isinstance(r.get("paraphrase_of"), str) and r["paraphrase_of"] not in known:
+            errors.append(f"{r.get('id')}: paraphrase_of names no row of the set")
     if privacy == "public":
         for r in rows:
             if isinstance(r, dict) and isinstance(r.get("expect"), dict) and r["expect"].get("answer_hint"):
@@ -226,8 +353,8 @@ def _manifest_errors(manifest, rows: list[dict], digest: str) -> list[str]:
     if not isinstance(manifest, dict):
         return ["manifest is not an object"]
     errors = []
-    if manifest.get("schema") != SCHEMA:
-        errors.append("manifest schema is not " + SCHEMA)
+    if manifest.get("schema") not in SCHEMAS:
+        errors.append("manifest schema is not one of " + ", ".join(SCHEMAS))
     if manifest.get("privacy") not in PRIVACY:
         errors.append("manifest privacy must be public or private")
     if manifest.get("sha256") != digest:
@@ -237,7 +364,7 @@ def _manifest_errors(manifest, rows: list[dict], digest: str) -> list[str]:
     if not isinstance(manifest.get("fixture"), str) or not manifest.get("fixture"):
         errors.append("manifest fixture missing")
     try:
-        if manifest.get("counts") != counts(rows):
+        if manifest.get("counts") != counts(rows, manifest.get("schema")):
             errors.append("manifest counts do not match the set")
     except (KeyError, TypeError):
         pass  # row errors already cover malformed rows

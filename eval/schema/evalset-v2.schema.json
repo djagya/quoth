@@ -1,0 +1,397 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/djagya/quoth/eval/schema/evalset-v2.schema.json",
+  "title": "quoth eval set v2 row",
+  "description": "One JSONL row of a quoth eval set (v2; every v1 row is a valid v2 row). The sibling <set>.manifest.json follows $defs/manifest. Cross-field rules (abstain <=> no sources, unanswerable => abstain, followup => context, unique ids, answer_hint only in private sets, groups list every source of `sources`, abstain_reason only on abstain rows, paraphrase_of names a row of the set) are checked by `quoth eval validate`; see docs/EVAL.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "question",
+    "lang",
+    "kind",
+    "origin",
+    "expect"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,128}$"
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "lang": {
+      "type": "string",
+      "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{1,8})?$"
+    },
+    "asked_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "ISO date (YYYY-MM-DD) or ISO datetime"
+    },
+    "context": {
+      "type": "array",
+      "description": "Preceding turns, oldest first (for follow-ups and, later, query rewriting).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "role",
+          "text"
+        ],
+        "properties": {
+          "role": {
+            "enum": [
+              "user",
+              "assistant"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "kind": {
+      "enum": [
+        "fact",
+        "preference",
+        "person",
+        "project_state",
+        "decision",
+        "temporal",
+        "knowledge_update",
+        "unanswerable",
+        "episodic",
+        "followup"
+      ]
+    },
+    "origin": {
+      "enum": [
+        "real_user",
+        "assistant_query",
+        "authored",
+        "synthetic"
+      ]
+    },
+    "expect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "abstain",
+        "sources"
+      ],
+      "properties": {
+        "abstain": {
+          "type": "boolean"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          }
+        },
+        "stale": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          },
+          "description": "Matches that must NOT be injected (knowledge updates)."
+        },
+        "answer_hint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Private sets only; never printed."
+        },
+        "groups": {
+          "type": "array",
+          "minItems": 2,
+          "description": "all-of evidence: every group is needed; sources lists exactly the groups' sources",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "any_of"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]{1,128}$"
+              },
+              "any_of": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "$ref": "#/$defs/source"
+                }
+              }
+            }
+          }
+        },
+        "negatives": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          },
+          "description": "judged look-alikes that must not be injected"
+        }
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "meta": {
+      "type": "object",
+      "description": "Source-format fields kept for round-trips (private)."
+    },
+    "split": {
+      "enum": [
+        "dev",
+        "test"
+      ],
+      "description": "dev rows tune thresholds (eval sweep); test rows only report. No split: both."
+    },
+    "cluster": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,128}$",
+      "description": "rows sharing gold notes; splits keep a cluster together"
+    },
+    "hops": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4,
+      "description": "notes the answer combines"
+    },
+    "abstain_reason": {
+      "enum": [
+        "no_memory_needed",
+        "not_in_vault",
+        "false_premise",
+        "near_miss"
+      ],
+      "description": "abstain rows only"
+    },
+    "paraphrase_of": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,128}$",
+      "description": "another row of the set with the same information need"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "author"
+      ],
+      "properties": {
+        "author": {
+          "type": "string",
+          "minLength": 1,
+          "description": "owner, assistant, llm:<model>, script:<name>"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "reviewed_by": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "reviewed_at": {
+          "type": "string"
+        },
+        "review": {
+          "enum": [
+            "accepted",
+            "edited",
+            "draft",
+            "rejected"
+          ],
+          "description": "draft and rejected rows are not scored"
+        },
+        "mined_from": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "store",
+        "match"
+      ],
+      "properties": {
+        "store": {
+          "enum": [
+            "vault",
+            "claims",
+            "owner",
+            "assistant"
+          ]
+        },
+        "match": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "description": "vault store only; vault-relative"
+            },
+            "locator": {
+              "type": "string",
+              "minLength": 1
+            },
+            "claim_text_contains": {
+              "type": "string",
+              "minLength": 1,
+              "description": "claims store only"
+            },
+            "subject_key": {
+              "type": "string",
+              "minLength": 1,
+              "description": "claims store only"
+            },
+            "text_contains": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "required": [
+        "schema",
+        "privacy",
+        "sha256",
+        "rows",
+        "counts",
+        "fixture"
+      ],
+      "properties": {
+        "schema": {
+          "enum": [
+            "quoth-evalset/v1",
+            "quoth-evalset/v2"
+          ]
+        },
+        "privacy": {
+          "enum": [
+            "public",
+            "private"
+          ]
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "counts": {
+          "type": "object",
+          "required": [
+            "kind",
+            "origin",
+            "lang",
+            "abstain"
+          ],
+          "properties": {
+            "kind": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            },
+            "origin": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            },
+            "lang": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            },
+            "abstain": {
+              "type": "object",
+              "properties": {
+                "true": {
+                  "type": "integer"
+                },
+                "false": {
+                  "type": "integer"
+                }
+              }
+            },
+            "split": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            },
+            "review": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            },
+            "groups": {
+              "type": "integer"
+            },
+            "abstain_reason": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "fixture": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "format": {
+              "enum": [
+                "golden-v1",
+                "golden-v3",
+                "ledger-updates"
+              ]
+            },
+            "sha256": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

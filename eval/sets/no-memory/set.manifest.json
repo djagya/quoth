@@ -1,0 +1,33 @@
+{
+  "counts": {
+    "abstain": {
+      "false": 0,
+      "true": 120
+    },
+    "abstain_reason": {
+      "no_memory_needed": 120
+    },
+    "groups": 0,
+    "kind": {
+      "unanswerable": 120
+    },
+    "lang": {
+      "en": 60,
+      "ru": 60
+    },
+    "origin": {
+      "authored": 120
+    },
+    "review": {
+      "accepted": 120
+    },
+    "split": {
+      "none": 120
+    }
+  },
+  "fixture": "any",
+  "privacy": "public",
+  "rows": 120,
+  "schema": "quoth-evalset/v2",
+  "sha256": "a28028fe70c2b58c6c46d487db6b883ccabb4ff6a5c16d52c41bd7d46d18bba0"
+}

@@ -12,7 +12,7 @@ import sys
 
 from .. import recall_defaults as D
 from ..assets import eval_path
-from .format import EvalSetError
+from .format import SPLITS, EvalSetError
 
 PRIVATE_WARNING = ("warning: --detail-out holds per-row ids, locators and vault paths of this set; "
                    "it is private data: keep it on this machine, never commit or share it")
@@ -118,7 +118,7 @@ def _cmd_run(a) -> int:
     from .format import load_set
     from .run import RunError, run_set
     try:
-        evalset = load_set(a.set)
+        evalset = load_set(a.set).select(a.split)
     except EvalSetError as exc:
         _err(f"invalid set: {exc}")
         return 2
@@ -173,6 +173,86 @@ def _cmd_compare(a) -> int:
         tolerances = load_tolerances(a.tolerances)
         result = compare(Receipt.load(a.a), Receipt.load(a.b), tolerances)
     except (OSError, ValueError) as exc:
+        _err(f"unusable input: {exc}")
+        return 2
+    _print(result)
+    return result["exit"]
+
+
+def _target_arguments(pr) -> None:
+    """The flags that build an `eval run` / `eval suite run` target."""
+    pr.add_argument("--socket", help="live sidecar socket instead of an in-process build")
+    pr.add_argument("--fixture-dir", help="directory built by `eval fixture` (fills the store paths)")
+    pr.add_argument("--db", help="serving snapshot or pointer (omit: no vault store)")
+    pr.add_argument("--ledger")
+    pr.add_argument("--state-db")
+    pr.add_argument("--episodes", help="assistant lane DB (what the assistant said)")
+    pr.add_argument("--owner-episodes", help="owner lane DB (what the owner wrote)")
+    pr.add_argument("--model", default=None,
+                    help="embedding model (default: the fixture's recorded model, else bge-m3)")
+    pr.add_argument("--evidence-budget", type=float, default=None,
+                    help=f"seconds prefetch waits for evidence (in-process default: the sidecar's"
+                         f" {D.EVIDENCE_BUDGET:g}; --socket default: 30)")
+    pr.add_argument("--episodes-prefetch", choices=("on", "off"), default="off")
+    pr.add_argument("--owner-prefetch", choices=("on", "off"), default="on")
+    pr.add_argument("--assistant-min-score", type=float)
+    pr.add_argument("--owner-min-score", type=float)
+    pr.add_argument("--k-candidates", type=int, default=10, help="candidates per store (max 20)")
+    pr.add_argument("--gold-drift", action="store_true",
+                    help="resolve expected vault paths against the snapshot (nightly gate rules)")
+    pr.add_argument("--retrieval", choices=D.RETRIEVAL_MODES, default=D.RETRIEVAL,
+                    help=f"vault ranking, as the sidecar's --retrieval (default {D.RETRIEVAL})")
+    pr.add_argument("--vault", help="live vault root: per-hit freshness (live) in explicit hits, as the"
+                                    " sidecar's --vault")
+    from .. import relevance, rerank
+    relevance.add_arguments(pr)
+    rerank.add_arguments(pr)
+
+
+def _cmd_suite_validate(a) -> int:
+    from .suite import SuiteError, load_entry, load_suite
+    try:
+        suite = load_suite(a.suite)
+        rows = {e.id: len(load_entry(suite, e).rows) for e in suite.entries}
+    except (SuiteError, EvalSetError) as exc:
+        _err(f"invalid suite: {exc}")
+        return 1
+    _print({"suite": suite.name, "fixture": suite.fixture, "sets": rows})
+    return 0
+
+
+def _cmd_suite_run(a) -> int:
+    from .run import RunError
+    from .suite import SuiteError, load_entry, load_suite, run_suite
+    try:
+        suite = load_suite(a.suite)
+        for e in suite.entries:
+            load_entry(suite, e)
+    except (SuiteError, EvalSetError) as exc:
+        _err(f"invalid suite: {exc}")
+        return 2
+    try:
+        target = _target(a)
+    except (RunError, OSError, ValueError, RuntimeError) as exc:
+        _err(f"cannot build target: {type(exc).__name__}: {exc}")
+        return 2
+    try:
+        summary = run_suite(suite, target, a.out, k_candidates=a.k_candidates, gold_drift=a.gold_drift)
+    except RunError as exc:
+        _err(str(exc))
+        return 2
+    finally:
+        target.close()
+    _print({sid: {"role": s["role"], "status": s["status"], **s["headline"]} for sid, s in summary["sets"].items()})
+    return 3 if any(s["status"] != "ok" for s in summary["sets"].values()) else 0
+
+
+def _cmd_suite_compare(a) -> int:
+    from .suite import SuiteError, compare_suites, load_suite
+    try:
+        suite = load_suite(a.suite) if a.suite else None
+        result = compare_suites(a.a, a.b, suite)
+    except (OSError, ValueError, SuiteError) as exc:
         _err(f"unusable input: {exc}")
         return 2
     _print(result)
@@ -263,25 +343,8 @@ def main(argv=None) -> int:
 
     pr = sub.add_parser("run", help="score a set against the real prefetch path (dry run)")
     pr.add_argument("set")
-    pr.add_argument("--socket", help="live sidecar socket instead of an in-process build")
-    pr.add_argument("--fixture-dir", help="directory built by `eval fixture` (fills the store paths)")
-    pr.add_argument("--db", help="serving snapshot or pointer (omit: no vault store)")
-    pr.add_argument("--ledger")
-    pr.add_argument("--state-db")
-    pr.add_argument("--episodes", help="assistant lane DB (what the assistant said)")
-    pr.add_argument("--owner-episodes", help="owner lane DB (what the owner wrote)")
-    pr.add_argument("--model", default=None,
-                    help="embedding model (default: the fixture's recorded model, else bge-m3)")
-    pr.add_argument("--evidence-budget", type=float, default=None,
-                    help=f"seconds prefetch waits for evidence (in-process default: the sidecar's"
-                         f" {D.EVIDENCE_BUDGET:g}; --socket default: 30)")
-    pr.add_argument("--episodes-prefetch", choices=("on", "off"), default="off")
-    pr.add_argument("--owner-prefetch", choices=("on", "off"), default="on")
-    pr.add_argument("--assistant-min-score", type=float)
-    pr.add_argument("--owner-min-score", type=float)
-    pr.add_argument("--k-candidates", type=int, default=10, help="candidates per store (max 20)")
-    pr.add_argument("--gold-drift", action="store_true",
-                    help="resolve expected vault paths against the snapshot (nightly gate rules)")
+    _target_arguments(pr)
+    pr.add_argument("--split", choices=SPLITS, help="score only this split's rows (rows without a split count in both)")
     pr.add_argument("--out", help="write the receipt here")
     pr.add_argument("--detail-out", help="PRIVATE per-row ids/locators/scores (local only)")
     pr.add_argument("--trace-out", help="PRIVATE JSONL per row: query, exact recall block, explicit hits"
@@ -289,15 +352,24 @@ def main(argv=None) -> int:
     pr.add_argument("--oracle", help="PRIVATE JSONL of {id, oracle} rows (the source text a row's answer"
                                      " rests on): joined to --trace-out by row id into a separate file")
     pr.add_argument("--oracle-out", help="where the oracle join goes (default: TRACE.oracle.jsonl)")
-    pr.add_argument("--retrieval", choices=D.RETRIEVAL_MODES, default=D.RETRIEVAL,
-                    help=f"vault ranking, as the sidecar's --retrieval (default {D.RETRIEVAL})")
-    pr.add_argument("--vault", help="live vault root: per-hit freshness (live) in explicit hits, as the"
-                                    " sidecar's --vault")
     pr.add_argument("--quiet", action="store_true", help="do not print the receipt")
-    from .. import relevance, rerank
-    relevance.add_arguments(pr)
-    rerank.add_arguments(pr)
     pr.set_defaults(func=_cmd_run)
+
+    pu = sub.add_parser("suite", help="run, compare or check a suite of sets (docs/EVAL.md#suites)")
+    usub = pu.add_subparsers(dest="suite_cmd", required=True)
+    uv = usub.add_parser("validate", help="check a suite file and every set it lists")
+    uv.add_argument("suite")
+    uv.set_defaults(func=_cmd_suite_validate)
+    ur = usub.add_parser("run", help="score every set of a suite on one target")
+    ur.add_argument("suite")
+    ur.add_argument("--out", required=True, help="directory for <id>.receipt.json and suite.json")
+    _target_arguments(ur)
+    ur.set_defaults(func=_cmd_suite_run)
+    uc = usub.add_parser("compare", help="compare two suite runs set by set (exit 0 pass, 1 fail, 3 incomparable)")
+    uc.add_argument("a")
+    uc.add_argument("b")
+    uc.add_argument("--suite", help="the suite file (per-set tolerances); default: built-in tolerances")
+    uc.set_defaults(func=_cmd_suite_compare)
 
     pm = sub.add_parser("compare", help="gate-style diff of two receipts (exit 0 pass, 1 fail, 3 incomparable)")
     pm.add_argument("a")
