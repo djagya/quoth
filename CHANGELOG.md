@@ -7,6 +7,14 @@ the `v*` tags.
 
 ### Recall
 
+- **Short messages need a shared word or a close match.** A query of at most 2 content words
+  ("thanks", "good night", "ты бот?") injects a vault hit only when the hit holds one of its
+  words or reaches cosine 0.65 (`--vault-short-terms`, `--vault-short-min-cosine`; `off`
+  restores the old gate). Short queries embed close to many notes. On a full real-vault
+  snapshot, the no-memory set's false-injection rate falls from 41% to 26%, and no golden-v1 or
+  golden-v3 row loses its injected answer. Receipts record each row's word count, so `eval
+  sweep` replays the rule.
+
 - **The reranker reads the note title, heading path and chunk text** (up to 1,200
   characters), not only the 360-character excerpt the block injects; `--rerank-max-tokens`
   defaults to 512 (was 192). On a full real-vault snapshot, reranking the bare excerpt ranked
