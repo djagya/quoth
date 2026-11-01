@@ -424,7 +424,7 @@ selects word-matched claims: a claim needs at least one of the query's content w
 | `--vault-min-cosine X` (default 0.53) | drop vault hits under X | `below_floor` |
 | `--vault-max-gap X` (default 0.15) | drop vault hits more than X below the turn's top hit | `gap` |
 | `--vault-lexical-rescue X` | a hit with this share of the query's words (at least 2) passes anyway; needs one of the two above | `lexical` |
-| `--vault-short-terms N` (default 2), `--vault-short-min-cosine X` (default 0.65) | a query of at most N content words is short: its vault hit must also hold one of its words or reach cosine X; set both or neither | `short_query` |
+| `--vault-short-terms N` (default 1), `--vault-short-min-cosine X` (default 0.60) | a query of at most N content words is short: its vault hit must also hold one of its words or reach cosine X; set both or neither | `short_query` |
 | `--claims-min-cosine X` | a meaning-matched claim needs this cosine | `cosine` / `below_floor` |
 | `--claims-min-lexical X` | a word-matched claim needs this share of the query's words | `lexical` / `weak_words` |
 

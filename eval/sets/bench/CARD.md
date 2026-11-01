@@ -83,7 +83,7 @@ The other 528 rows are `review: accepted`. Every row has `reviewed_by:
 ["llm:claude-opus-5.5:blind-checker"]`. `SPOTCHECK.md` lists 40 rows (seeded, stratified by row
 type and language) for the owner's review; the set becomes v2 of this card once they are read.
 
-**Baseline** (quoth after 0.17.1, with the unreleased short-message rule; BGE-M3, dense retrieval, the serving
+**Baseline** (quoth after 0.17.1, with the unreleased short-message rule at its tuned default; BGE-M3, dense retrieval, the serving
 gate and evidence budget, 4 CPUs, 2026-11-01). Rates over answerable rows unless said; 95%
 Wilson intervals in brackets.
 
@@ -93,28 +93,30 @@ Wilson intervals in brackets.
 | vault hit@5 | 0.979 [0.953–0.991] | 0.942 | 0.964 [0.941–0.978] |
 | vault hit@10 | 0.992 [0.971–0.998] | 0.983 | 0.988 [0.972–0.995] |
 | vault MRR | 0.946 | 0.875 | 0.916 |
-| injected hit rate | 0.667 [0.605–0.723] | 0.659 | 0.663 [0.617–0.707] |
-| injected precision | 0.850 | 0.793 | 0.826 |
+| injected hit rate | 0.696 [0.635–0.750] | 0.694 | 0.695 [0.649–0.737] |
+| injected precision | 0.852 | 0.784 | 0.823 |
 | groups all@10 / injected all | 1.000 / 0.379 (29) | 0.833 / 0.278 (18) | 0.936 / 0.340 (47) |
-| negative leak rate (answerable rows with negatives) | 0.367 | 0.483 | 0.424 |
-| abstain non-empty rate | 0.420 [0.311–0.538] | 0.463 | 0.439 [0.355–0.527] |
-| — `not_in_vault` | 0.103 (29) | 0.105 (19) | 0.104 (48) |
+| negative leak rate (answerable rows with negatives) | 0.367 | 0.500 | 0.432 |
+| abstain non-empty rate | 0.420 [0.311–0.538] | 0.500 | 0.455 [0.370–0.543] |
+| — `not_in_vault` | 0.103 (29) | 0.211 (19) | 0.146 (48) |
 | — `false_premise` | 0.600 (20) | 0.733 (15) | 0.657 (35) |
 | — `near_miss` | 0.700 (20) | 0.600 (20) | 0.650 (40) |
 | p95 prefetch latency | 44 ms | 48 ms | 46 ms |
 
-By language (all rows): English hit@5 0.977, MRR 0.935, injected hit 0.711; Russian hit@5
-0.950, MRR 0.896, injected hit 0.611. Abstain non-empty: English 0.508, Russian 0.367.
+By language (all rows): English hit@5 0.977, MRR 0.935, injected hit 0.729; Russian hit@5
+0.950, MRR 0.896, injected hit 0.657. Abstain non-empty: English 0.508, Russian 0.400.
 
 **What it can detect.** With 10% of rows differing between two runs, a paired McNemar test
 detects about 5.7 points of injected hit rate on the test split (243 answerable rows), 4.3 on
 the whole set (416), and about 10 points of abstain injection on test (69 abstain rows). Two
 gate configurations that differ on fewer rows give a smaller `mde` (`eval compare` reports
-it). Example: the short-message rule (0.17.1 against the code after it) changes 15 of 416 answerable
-rows here: injected hit rate 0.695 → 0.663 (14 lost, 1 gained, exact p 0.001), while abstain
-injections fall 0.463 → 0.439 (3 of 123, p 0.25). 9 of the 14 lost rows are Russian questions
-about English notes or the reverse: a short cross-language question shares no word with its
-note.
+it). Example: the first draft of the short-message rule (up to 2 content words need a shared
+word or cosine 0.65) changed 15 of 416 answerable rows here: injected hit rate 0.695 → 0.663
+(14 lost, 1 gained, exact p 0.001), while abstain injections fell only 0.463 → 0.439. 9 of the
+14 lost rows were Russian questions about English notes or the reverse: a short cross-language
+question shares no word with its note. Tuned on the dev split (1 content word, cosine 0.60),
+the rule costs nothing measurable here (0.695 → 0.695) and still cuts false injection on the
+no-memory set.
 
 **Limits.**
 - A 72-note vault is small: vault hit@10 sits near the ceiling with BGE-M3, so a change in

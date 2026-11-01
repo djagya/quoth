@@ -363,7 +363,7 @@ Paths default under `$QUOTH_HOME`; the Hermes `state.db` under `$HERMES_HOME`.
 | `--capture-misses-max N` | 500 | keep at most N candidates (oldest pruned first) |
 | `--vault-min-cosine X\|off` | 0.53 | relevance gate: vault cosine floor |
 | `--vault-max-gap X\|off` | 0.15 | relevance gate: most a vault hit may sit below the turn's top hit |
-| `--vault-short-terms N\|off`, `--vault-short-min-cosine X\|off` | 2, 0.65 | relevance gate: a query of at most N content words injects a vault hit only if the hit holds one of its words or reaches cosine X |
+| `--vault-short-terms N\|off`, `--vault-short-min-cosine X\|off` | 1, 0.60 | relevance gate: a query of at most N content words injects a vault hit only if the hit holds one of its words or reaches cosine X |
 | `--vault-lexical-rescue`, `--claims-min-cosine`, `--claims-min-lexical` | off | further relevance-gate rules (`off` turns any gate rule off) |
 | `--rerank-model NAME` | off | cross-encoder reranker |
 | `--rerank-budget S` | 0.8 | seconds a turn's reranking may take |

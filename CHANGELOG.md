@@ -7,13 +7,17 @@ the `v*` tags.
 
 ### Recall
 
-- **Short messages need a shared word or a close match.** A query of at most 2 content words
-  ("thanks", "good night", "ты бот?") injects a vault hit only when the hit holds one of its
-  words or reaches cosine 0.65 (`--vault-short-terms`, `--vault-short-min-cosine`; `off`
-  restores the old gate). Short queries embed close to many notes. On a full real-vault
-  snapshot, the no-memory set's false-injection rate falls from 41% to 26%, and no golden-v1 or
-  golden-v3 row loses its injected answer. Receipts record each row's word count, so `eval
-  sweep` replays the rule.
+- **Short messages need a shared word or a close match.** A query of at most 1 content word
+  ("thanks", "good night", "ты бот?") injects a vault hit only when the hit holds that word or
+  reaches cosine 0.60 (`--vault-short-terms`, `--vault-short-min-cosine`; `off` restores the
+  old gate). Short queries embed close to many notes. On a full real-vault snapshot, the
+  no-memory set's false-injection rate falls from 41% to 31% (12 rows fixed, none broken, exact
+  p 0.0005), and no golden-v1 or golden-v3 row loses its injected answer. On the public
+  benchmark the injected hit rate is unchanged (0.695). A first draft (2 words, cosine 0.65)
+  cut false injection to 26% but cost the benchmark 14 injected hits, mostly short
+  cross-language questions, which share no word with their note; the defaults were tuned on
+  the benchmark's dev split. Receipts record each row's word count, so `eval sweep` replays
+  the rule.
 
 - **The reranker reads the note title, heading path and chunk text** (up to 1,200
   characters), not only the 360-character excerpt the block injects; `--rerank-max-tokens`
@@ -75,11 +79,10 @@ the `v*` tags.
   rows. 416 are answerable (47 need 2–3 notes, 78 carry judged negatives); 123 abstain
   (`not_in_vault`, `false_premise`, `near_miss`). Split dev/test by topic cluster. A blind
   check (the same model in a fresh context, without the labels) agreed with 538 of them.
-  With BGE-M3 on the test split: vault hit@10 0.99, MRR 0.95, injected hit rate 0.67 (95%
-  interval 0.61–0.72), false injection on 42% of abstain rows. A paired test detects about 6
-  points there, against about 12 on a 50-row personal set. On this set the short-message rule above costs 14 injected hits and gains 1
-  (0.695 → 0.663, exact p 0.001), mostly short cross-language questions, while saving 3 of
-  123 abstain injections. `eval fixture` now builds a fixture without `ledger-seed.jsonl` or
+  With BGE-M3 on the test split: vault hit@10 0.99, MRR 0.95, injected hit rate 0.70 (95%
+  interval 0.63–0.75), false injection on 42% of abstain rows. A paired test detects about 6
+  points there, against about 12 on a 50-row personal set. `eval fixture` now builds a
+  fixture without `ledger-seed.jsonl` or
   `telegram.jsonl` (empty ledger and lanes).
 
 ### Nightly

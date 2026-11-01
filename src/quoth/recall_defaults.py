@@ -83,10 +83,11 @@ GATE = {
     # after stopwords. Such a turn injects a vault hit only when the hit holds one of its
     # words or its cosine reaches vault_short_min_cosine. Short queries embed close to many
     # notes: on a full real-vault snapshot, prefetch injected excerpts into 41% of the
-    # no-memory set's turns (mostly greetings and thanks); with this rule 26%, and no golden
-    # row lost its injected answer.
-    "vault_short_terms": 2,
-    "vault_short_min_cosine": 0.65,
+    # no-memory set's turns (mostly greetings and thanks); with this rule 31%, and no golden
+    # row lost its injected answer. Tuned on the public benchmark's dev split: 2 words would
+    # drop short cross-language questions, which share no word with their note.
+    "vault_short_terms": 1,
+    "vault_short_min_cosine": 0.60,
 }
 
 # ---------------------------------------------------------------- reranker

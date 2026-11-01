@@ -437,7 +437,7 @@ def test_short_rule_thresholds_go_together():
         Gate(vault_min_cosine=0.5, vault_short_min_cosine=0.6)
     with pytest.raises(ValueError):
         Gate(vault_min_cosine=0.5, vault_short_terms=1.5, vault_short_min_cosine=0.6)
-    assert relevance.default_gate().vault_short_terms == 2
+    assert relevance.default_gate().vault_short_terms == 1
 
 
 def test_short_queries_skip_unrelated_hits_live_and_in_replay(tmp_path, state_db):
