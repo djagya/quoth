@@ -179,7 +179,8 @@ def run_suite_on_snapshot(suite: Suite, db: str | Path, out_dir: str | Path, *, 
     from .gate import GATE_EVIDENCE_BUDGET, SnapshotScorer
     budget = GATE_EVIDENCE_BUDGET if evidence_budget is None else evidence_budget
     with SnapshotScorer(Path(db), embedder=embedder, model=model, evidence_budget=budget) as scorer:
-        return run_suite(suite, scorer.target, out_dir, gold_drift=True)
+        # Prefetch only: the gate compares what turns inject, not the explicit search.
+        return run_suite(suite, scorer.target, out_dir, gold_drift=True, explicit=False)
 
 
 def compare_suites(a_dir: str | Path, b_dir: str | Path, suite: Suite | None = None, *,

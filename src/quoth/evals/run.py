@@ -330,11 +330,12 @@ def trace_line(row: dict, prefetch: dict, explicit: dict | None, settings: dict)
 
 def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATES,
             gold_drift: bool = False, detail: bool = False, warmup: bool = True,
-            trace: list | None = None) -> tuple[Receipt, list | None]:
+            trace: list | None = None, explicit: bool = True) -> tuple[Receipt, list | None]:
     """Run every row through `target.prefetch` (dry run) and, with a vault, the explicit
     `evidence_bundle` (`target.evidence`). Returns (receipt, per-row detail|None); with
     `trace` (a list), one `trace_line` per row is appended to it. Only reviewed rows are
-    scored (`EvalSet.select`: drafts and rejected rows are left out), of the set's split."""
+    scored (`EvalSet.select`: drafts and rejected rows are left out), of the set's split.
+    `explicit=False` skips the explicit call (the nightly gate: half the evidence work)."""
     evalset = evalset.select(evalset.split) if not evalset.skipped else evalset
     target.prepare()
     if warmup:
@@ -353,7 +354,7 @@ def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATE
     observations, timings, statuses, rows_detail, recorded = [], [], {}, [], {}
     explicit_obs = []
     config = target.config()
-    explicit_on = bool((config.get("stores") or {}).get("vault")) and hasattr(target, "evidence")
+    explicit_on = explicit and bool((config.get("stores") or {}).get("vault")) and hasattr(target, "evidence")
     settings = {"gate": config.get("gate"), "retrieval": config.get("retrieval"),
                 "evidence_budget": config.get("evidence_budget"), "k_candidates": k_candidates,
                 "k_evidence": D.PREFETCH_EVIDENCE, "k_explicit": EXPLICIT_K,
