@@ -372,6 +372,7 @@ selects word-matched claims: a claim needs at least one of the query's content w
 | `--vault-min-cosine X` (default 0.53) | drop vault hits under X | `below_floor` |
 | `--vault-max-gap X` (default 0.15) | drop vault hits more than X below the turn's top hit | `gap` |
 | `--vault-lexical-rescue X` | a hit with this share of the query's words (at least 2) passes anyway; needs one of the two above | `lexical` |
+| `--vault-short-terms N` (default 2), `--vault-short-min-cosine X` (default 0.65) | a query of at most N content words is short: its vault hit must also hold one of its words or reach cosine X; set both or neither | `short_query` |
 | `--claims-min-cosine X` | a meaning-matched claim needs this cosine | `cosine` / `below_floor` |
 | `--claims-min-lexical X` | a word-matched claim needs this share of the query's words | `lexical` / `weak_words` |
 
@@ -388,7 +389,9 @@ sidecar would (judge the pool, inject the best that pass) and scores each config
 harness metrics. Its time budgets default to the sidecar's (`--evidence-budget 1.5`,
 `--rerank-budget 0.8`). Ranked metrics count an
 expected source only if it passes the gate. Default grids: vault floors in 0.01 steps over the
-recorded scores × gaps (off, 0.02–0.2) × rescues (off, 0.5, 0.75, 1.0); claim floors in 0.01
+recorded scores × gaps (off, 0.02–0.2) × rescues (off, 0.5, 0.75, 1.0), each with the
+default short-query rule (receipts from before 0.18 lack the query's word count, so a replay
+of one skips that rule); claim floors in 0.01
 steps × word shares (off, 0.25–1.0); then the 5 best of each combined. `--vault-cosines`,
 `--vault-gaps`, `--vault-rescues`, `--claims-cosines`, `--claims-lexicals` override a grid
 (comma lists, `none` = off).

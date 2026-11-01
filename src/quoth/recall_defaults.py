@@ -79,6 +79,14 @@ GATE = {
     "vault_max_rerank_gap": None,
     "vault_rerank_widen": None,
     "claims_min_rerank": None,
+    # Short messages ("thanks", "good morning", "ты бот?"): at most this many content words
+    # after stopwords. Such a turn injects a vault hit only when the hit holds one of its
+    # words or its cosine reaches vault_short_min_cosine. Short queries embed close to many
+    # notes: on a full real-vault snapshot, prefetch injected excerpts into 41% of the
+    # no-memory set's turns (mostly greetings and thanks); with this rule 26%, and no golden
+    # row lost its injected answer.
+    "vault_short_terms": 2,
+    "vault_short_min_cosine": 0.65,
 }
 
 # ---------------------------------------------------------------- reranker
