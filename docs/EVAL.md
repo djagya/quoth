@@ -346,10 +346,19 @@ quoth rerank check                      # verify, load, score 3 public pairs, pr
 ```
 
 It prints the load time and the latency of 3 pairs, short (`ms_3_pairs`) and filled to the
-token limit (`ms_3_pairs_full`). Each pair is the query and the hit's injected excerpt (360
-characters) truncated together to `--rerank-max-tokens` (default 192); the score is `sigmoid(logit)`, 0..1. Threads follow
-the CPU quota like BGE-M3 (`QUOTH_EMBED_THREADS` overrides). Loaded, either variant adds up to
-about 1.5 GB of peak memory to the sidecar.
+token limit (`ms_3_pairs_full`). Each pair is the query and what the reranker reads of the
+hit: the note title and heading path, as the embedder sees them, then the chunk text (up to
+1,200 characters), truncated together to `--rerank-max-tokens` (default 512). The score is
+`sigmoid(logit)`, 0..1. Threads follow the CPU quota like BGE-M3 (`QUOTH_EMBED_THREADS`
+overrides). Loaded, either variant adds up to about 1.5 GB of peak memory to the sidecar.
+
+Why the context: on a full real-vault snapshot (golden-v1 and golden-v3, dense pool of 10,
+one hit per note), reranking the bare injected excerpt (360 characters) put the gold note among the top 3
+less often than cosine order (golden-v1 0.714 vs 0.755, golden-v3 0.648 vs 0.833). With the
+title, heading and chunk it put it there more often (0.816 and 0.889 reranking all 10; 0.837
+and 0.870 reranking the top 5). Each set gains 3 rows, which is not yet significant (exact
+McNemar p 0.51 and 0.38), so a rerank rule stays opt-in until a sweep on the serving machine
+picks one. Cost: 10 pairs at 512 tokens take about 1.5 s on 4 cores, 5 pairs about 0.75 s.
 
 **On a turn.** The sidecar loads the reranker in the background after BGE-M3's warm-up
 (`reranker.status`: `loading`, `ready`, `unavailable`). It scores on its own worker thread, so

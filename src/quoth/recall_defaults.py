@@ -83,7 +83,7 @@ GATE = {
 
 # ---------------------------------------------------------------- reranker
 
-RERANK_MAX_TOKENS = 192   # query + passage tokens per pair (holds a VAULT_SNIPPET and a query)
+RERANK_MAX_TOKENS = 512   # query + passage tokens per pair (a query, title, heading and chunk)
 
 # ---------------------------------------------------------------- background work
 
