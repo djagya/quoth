@@ -70,6 +70,17 @@ the `v*` tags.
   earlier run; skipped when the variables are unset. `eval/suites/personal.example.json`
   shows a personal suite. `eval compare` tolerances accept `excused_lost_gold` (ids whose
   lost gold does not count).
+- **A public retrieval benchmark** (`eval/bench`, `eval/sets/bench`, `eval/suites/bench.json`):
+  a fictional persona vault of 72 English and Russian notes with look-alike pairs, and 539 v2
+  rows. 416 are answerable (47 need 2–3 notes, 78 carry judged negatives); 123 abstain
+  (`not_in_vault`, `false_premise`, `near_miss`). Split dev/test by topic cluster. A blind
+  check (the same model in a fresh context, without the labels) agreed with 538 of them.
+  With BGE-M3 on the test split: vault hit@10 0.99, MRR 0.95, injected hit rate 0.67 (95%
+  interval 0.61–0.72), false injection on 42% of abstain rows. A paired test detects about 6
+  points there, against about 12 on a 50-row personal set. On this set the short-message rule above costs 14 injected hits and gains 1
+  (0.695 → 0.663, exact p 0.001), mostly short cross-language questions, while saving 3 of
+  123 abstain injections. `eval fixture` now builds a fixture without `ledger-seed.jsonl` or
+  `telegram.jsonl` (empty ledger and lanes).
 
 ### Nightly
 

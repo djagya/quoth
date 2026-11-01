@@ -332,8 +332,8 @@ receipt not comparable). The shipped `eval/suites/public.json` pairs the fixture
 power, alpha 0.05) depends on the rows and on how many of them differ between the two
 runs; `eval compare` reports it as `mde` per McNemar test. With 10% of rows differing:
 about 12 points at 50 rows, 7 at 150, 5 at 300, 3 at 900. So personal sets of about 50 rows
-are regression guards; claims of 2–3 point gains need a much larger set (the public
-benchmark) or the same direction across several sets.
+are regression guards; claims of 2–3 point gains need a much larger set (the [public
+benchmark](#public-benchmark-evalbench)) or the same direction across several sets.
 
 **The no-memory set** (`builtin: no-memory`, [card](../eval/sets/no-memory/CARD.md)): 120
 messages in English and Russian that need no recall (chit-chat, general knowledge, code and
@@ -571,6 +571,36 @@ uv run quoth eval compare /tmp/run.json /tmp/run.json
 
 `hash-ngram` is not a semantic model, so fixture numbers check plumbing, not quality. CI runs
 the fixture in `tests/test_evals.py` and against the installed wheel in `scripts/ci_smoke.py`.
+
+## Public benchmark: `eval/bench/`
+
+The public fixture checks plumbing; the benchmark measures quality at a size where a few
+points mean something ([card](../eval/sets/bench/CARD.md)):
+
+- `eval/bench/vault/`: 72 notes of one fictional person, English and Russian, in 25 topic
+  clusters with deliberate look-alikes (two trips to one country, an old and a new plan). A
+  vault-only fixture: `eval fixture` builds its ledger and lanes empty.
+- `eval/sets/bench/set.jsonl`: 539 v2 rows, 416 answerable (47 all-of group rows, 78 with
+  judged negatives, 41 paraphrases) and 123 abstain (`not_in_vault`, `false_premise`,
+  `near_miss`), about half in each language. Split by cluster, 42% `dev` and 58% `test`; no
+  note is used in both splits. Labels were checked blind by a second model instance (99.8%
+  agreement); `SPOTCHECK.md` holds 40 rows for a human review.
+- `eval/suites/bench.json`: the test split as `quality`, the dev split as `tune`, and the
+  no-memory set as `regression`.
+
+```sh
+quoth eval fixture eval/bench --out /tmp/bench --model bge-m3     # needs the dense extra
+quoth eval suite run eval/suites/bench.json --fixture-dir /tmp/bench --out /tmp/bench-a
+# change a flag, run again into /tmp/bench-b, then:
+quoth eval suite compare /tmp/bench-a /tmp/bench-b --suite eval/suites/bench.json
+```
+
+Tune gate thresholds with `eval sweep` on a `--split dev` receipt and report the test split.
+With BGE-M3 the test split gives vault hit@10 0.99 and MRR 0.95 (near the ceiling on a vault
+this small), injected hit rate 0.67, and false injection on 42% of abstain rows: 10% of
+`not_in_vault`, 60–70% of `false_premise` and `near_miss`. A paired test on the test split
+detects about 6 points of injected hit rate. `tests/test_bench_set.py` checks the floors
+(size, balance, split purity, every note referenced) and runs the fixture with `hash-ngram`.
 
 ## Online measurement: the prefetch log
 
