@@ -1,0 +1,10 @@
+{
+  "schema": "quoth-evalsuite/v1",
+  "name": "public",
+  "description": "The shipped synthetic fixture plus the portable no-memory set. With the hash embedder (CI) it checks plumbing; with BGE-M3 the no-memory set measures false injection.",
+  "fixture": "eval/public",
+  "sets": [
+    {"id": "fixture", "path": "../public/set.jsonl", "role": "smoke"},
+    {"id": "no-memory", "builtin": "no-memory", "role": "regression"}
+  ]
+}

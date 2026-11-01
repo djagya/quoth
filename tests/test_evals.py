@@ -36,7 +36,7 @@ def test_public_set_is_valid_and_covers_every_kind():
 
 
 def test_json_schema_matches_the_validator():
-    schema = json.loads((REPO / "eval" / "schema" / "evalset-v1.schema.json").read_text())
+    schema = json.loads((REPO / "eval" / "schema" / "evalset-v2.schema.json").read_text())
     props = schema["properties"]
     assert tuple(props["kind"]["enum"]) == KINDS and tuple(props["origin"]["enum"]) == ORIGINS
     assert tuple(schema["$defs"]["source"]["properties"]["store"]["enum"]) == STORES
@@ -188,7 +188,7 @@ def test_public_fixture_runs_end_to_end_with_receipt_shape(run):
     assert all(data["config"]["stores"].values())
     assert data["scored"] == len(load_set(SET).rows) and data["gold_drift"]["stale"] == 0
     metrics = data["metrics"]
-    assert set(metrics) == {"overall", "by_kind", "by_origin", "by_lang"}
+    assert set(metrics) == {"overall", "ci95", "by_kind", "by_origin", "by_lang"}
     assert set(metrics["by_kind"]) == set(KINDS)
     overall = metrics["overall"]
     for key in ("injected_hit_rate", "injected_mrr", "injected_precision", "abstain_nonempty_rate",

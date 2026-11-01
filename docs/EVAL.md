@@ -5,10 +5,11 @@ CLI:
 
 | Command | What it does |
 |---|---|
-| `quoth eval validate SET` | check a set and its manifest against eval set v1 |
+| `quoth eval validate SET` | check a set and its manifest against the eval set format (v1 or v2) |
 | `quoth eval convert --from golden-v1\|golden-v3\|ledger-updates IN OUT` | convert another format to eval set v1 (writes OUT and its manifest) |
 | `quoth eval fixture [SRC] --out DIR [--model M]` | build a fixture's stores (snapshot, ledger, `state.db`, both lanes) from text; `SRC` defaults to the shipped `eval/public` |
-| `quoth eval run SET …` | score a set against the real prefetch path and write a receipt |
+| `quoth eval run SET [--split dev\|test] …` | score a set against the real prefetch path and write a receipt |
+| `quoth eval suite validate\|run\|compare …` | run every set of a suite on one target, and compare two suite runs set by set ([Suites](#suites)) |
 | `quoth eval compare A B [--tolerances FILE]` | gate-style diff of two receipts |
 | `quoth eval sweep RECEIPT [--max-loss 0.01]` | replay relevance-gate thresholds on a receipt's candidates |
 | `quoth eval online --log DIR [--days N] [--since T] [--until T] [--max-turns N]` | aggregate readout of the sidecar's prefetch log, with the late-tail window report |
@@ -26,12 +27,13 @@ Privacy: public sets and fixtures are synthetic and live in `eval/public/`. Keep
 sets outside the repository and load them by path. Nothing the tools print or write by
 default contains question text, note paths or excerpts.
 
-## Eval set v1
+## Eval sets (v1 and v2)
 
 A set is a JSONL file plus a sibling manifest (`set.jsonl` → `set.manifest.json`). JSON
-Schema: [`eval/schema/evalset-v1.schema.json`](../eval/schema/evalset-v1.schema.json) (the
-row, with the manifest under `$defs/manifest`). `eval validate` checks the schema and the
-cross-field rules below.
+Schema: [`eval/schema/evalset-v2.schema.json`](../eval/schema/evalset-v2.schema.json) (the
+row, with the manifest under `$defs/manifest`; the v1 schema stays for reference).
+`eval validate` checks the schema and the cross-field rules below. v2 only adds optional
+fields: every v1 row is a valid v2 row, v1 manifests still load, and `write_set` writes v2.
 
 ### Row
 
@@ -62,16 +64,35 @@ cross-field rules below.
 - `stale` (optional): sources that must not be injected (superseded values of a knowledge
   update).
 - `answer_hint` (optional): private sets only; never printed or copied into a receipt.
+- `groups` (v2, optional): all-of evidence for a question that needs several notes:
+  `[{name, any_of: [source…]}, …]`, at least 2. Every group is needed; `sources` must list
+  exactly the groups' sources, so v1 readers (the nightly gate) see their any-of union.
+- `negatives` (v2, optional): judged look-alikes that must not be injected (another person
+  with the same name, an older version of a note). Unlike `stale`, a leak is reported, not a
+  failure of the row.
+
+v2 row fields, all optional:
+
+| Field | Meaning |
+|---|---|
+| `split` | `dev` (thresholds and sweeps tune on it) or `test` (reported only). A row without a split belongs to both. Keep rows that share gold notes in one split. |
+| `cluster` | id of rows that share gold notes, for assigning splits |
+| `hops` | 1–4: notes the answer combines |
+| `abstain_reason` | abstain rows only: `no_memory_needed` (chit-chat, general knowledge, a pure task), `not_in_vault` (plausible but absent), `false_premise` (assumes something the stores contradict or lack), `near_miss` (a look-alike exists and must not be injected) |
+| `provenance` | `{author, created_at, reviewed_by, reviewed_at, review, mined_from}`; `author` is required (`owner`, `assistant`, `llm:<model>`, `script:<name>`). `review` is `accepted` (default), `edited`, `draft` or `rejected`: drafts and rejected rows stay in the file for review and are not scored. |
+| `paraphrase_of` | another row of the set with the same information need |
 
 ### Manifest
 
 ```json
-{"schema": "quoth-evalset/v1", "privacy": "public|private", "sha256": "<of the JSONL bytes>",
- "rows": 29, "counts": {"kind": {}, "origin": {}, "lang": {}, "abstain": {"true": 3, "false": 26}},
+{"schema": "quoth-evalset/v2", "privacy": "public|private", "sha256": "<of the JSONL bytes>",
+ "rows": 29, "counts": {"kind": {}, "origin": {}, "lang": {}, "abstain": {"true": 3, "false": 26},
+                        "split": {"none": 29}, "review": {"accepted": 29}, "groups": 0, "abstain_reason": {}},
  "fixture": "eval/public", "source": {"format": "golden-v1", "sha256": "<of the converted input>"}}
 ```
 
-`fixture` names the store set the rows target. Converters and `write_set` write the
+A v1 manifest has only the first four counts. `fixture` names the store set the rows target;
+`any` marks a set that runs on any stores (the shipped no-memory set). Converters and `write_set` write the
 manifest; a private set and its manifest are written with mode 0600.
 
 ### Converters
@@ -143,8 +164,11 @@ yet (`config.context: "ignored"`).
 
 ### Metrics
 
-All aggregate: overall and by `kind`, `origin` and `lang`, per store (`claims`, `vault`,
-`owner`, `assistant`) inside each block.
+All aggregate: overall and by `kind`, `origin` and `lang` (and by `split`, `abstain_reason`
+and `hops` when any row sets them), per store (`claims`, `vault`, `owner`, `assistant`)
+inside each block. `metrics.ci95` holds 95% Wilson intervals of the headline rates (vault
+hit@5 and hit@10, injected hit rate, abstain_nonempty_rate): on a 50-row set an interval is
+about ±8 points wide, which is what the set can tell apart.
 
 | Metric | Definition |
 |---|---|
@@ -162,6 +186,8 @@ All aggregate: overall and by `kind`, `origin` and `lang`, per store (`claims`, 
 | `explicit.hit@k` (k 1, 3, 5, 10), `explicit.recall@10` | the explicit `evidence_bundle` (k 10) over rows with vault gold: an expected path in its top k; mean share of expected paths in the top 10 |
 | `explicit.repeat_rate` | share of explicit hits whose note already appeared earlier in the same bundle |
 | `explicit.changed_hits` | explicit hits marked `changed` since indexing (with `--vault`) |
+| `groups.all@k` (k 5, 10), `groups.group_recall@10`, `groups.injected_all_rate` | all-of rows: every group's first vault hit within k; share of groups found in the top 10; every group in the injected block |
+| `negative_leak_rate` | rows with judged negatives where one was injected (lower is better) |
 
 `stores.vault.hit@5`, `hit@10`, `mrr` and `recall@10` are the nightly gate's metrics: the
 gate scores with the same candidates and matching.
@@ -257,6 +283,60 @@ difference with `significant: false` is noise as far as the set can tell.
 | 1 | – | regression past a tolerance, or lost gold | invalid set |
 | 2 | unusable input (set, target) | unreadable receipt or tolerances | – |
 | 3 | gold drift excessive | not comparable: different set, or B not ok | – |
+
+## Suites
+
+A suite is one JSON file that lists sets and what each is for, so public and personal sets
+run the same way against one target (a fixture, a snapshot, or a live sidecar):
+
+```json
+{"schema": "quoth-evalsuite/v1", "name": "personal", "fixture": "box",
+ "tolerances": "tolerances.json",
+ "sets": [
+   {"id": "golden-v1", "path": "golden-v1.evalset.jsonl", "role": "regression"},
+   {"id": "golden-v3", "path": "golden-v3.evalset.jsonl", "role": "quality"},
+   {"id": "no-memory", "builtin": "no-memory", "role": "quality"},
+   {"id": "tune", "path": "golden-v3.evalset.jsonl", "role": "tune", "split": "dev"}]}
+```
+
+- `path` is relative to the suite file (`~` and `$VARS` expand); `builtin` names a set
+  shipped under `eval/sets/` (in the wheel too). A set runs only on a suite whose `fixture`
+  equals its manifest's, or when its manifest says `any`.
+- `split` scores one split's rows (as `eval run --split`). Drafts and rejected rows are
+  never scored.
+- Roles:
+
+| Role | Use | Fails `suite compare` when |
+|---|---|---|
+| `smoke` | plumbing (the hash fixture in CI) | a tolerance fails, as `regression` |
+| `regression` | guards: lost gold, stale leaks, floors | a tolerance fails (`eval compare`) |
+| `quality` | capability numbers, with intervals and the smallest detectable change | a paired test on vault hit@10, injected hit, abstain injections or all@10 is significantly worse, or a stale value leaks |
+| `tune` | the rows `eval sweep` may tune thresholds on | never compared |
+
+```sh
+quoth eval suite validate eval/suites/public.json
+quoth eval suite run eval/suites/public.json --fixture-dir /tmp/quoth-fixture --out /tmp/a
+quoth eval suite compare /tmp/a /tmp/b --suite eval/suites/public.json
+```
+
+`suite run` writes `<id>.receipt.json` per set and `suite.json` (role, status, headline
+metrics and intervals per set; ids and aggregates only); it exits 3 if a set's run is not
+`ok`. `suite compare` exits 0 pass, 1 fail, 3 incomparable (a set missing on one side, or a
+receipt not comparable). The shipped `eval/suites/public.json` pairs the fixture set
+(`smoke`) with the no-memory set (`regression`).
+
+**How much a set can tell.** The smallest change of a hit rate a paired test detects (80%
+power, alpha 0.05) depends on the rows and on how many of them differ between the two
+runs; `eval compare` reports it as `mde` per McNemar test. With 10% of rows differing:
+about 12 points at 50 rows, 7 at 150, 5 at 300, 3 at 900. So personal sets of about 50 rows
+are regression guards; claims of 2–3 point gains need a much larger set (the public
+benchmark) or the same direction across several sets.
+
+**The no-memory set** (`builtin: no-memory`, [card](../eval/sets/no-memory/CARD.md)): 120
+messages in English and Russian that need no recall (chit-chat, general knowledge, code and
+writing tasks, questions about the assistant). Every row abstains, so its
+`abstain_nonempty_rate` is the false-injection rate on any vault. Read it next to an
+answerable set: a gate that never injects scores perfectly here.
 
 ## Relevance gate and `eval sweep`
 
