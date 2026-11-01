@@ -373,6 +373,7 @@ installed package (replace the `/path/to/...` placeholders with your own directo
 docker run --rm --entrypoint python \
   -v "$PWD/src:/src:ro" -e PYTHONPATH=/src \
   -v "$PWD/tests:/app/tests:ro" -v "$PWD/pyproject.toml:/app/pyproject.toml:ro" \
+  -v "$PWD/eval:/eval:ro" \
   -v quoth_quoth-models:/models:ro -e QUOTH_MODEL_CACHE=/models \
   -v /path/to/personal-sets:/personal:ro \
   -v /path/to/snapshot-dir:/snapshot:ro \
@@ -384,7 +385,9 @@ docker run --rm --entrypoint python \
   quoth:017 -m pytest -q -s -p no:cacheprovider -m personal tests/test_personal_suite.py
 ```
 
-Leave out `QUOTH_PERSONAL_BASELINE` on the first run. The snapshot directory must hold the
+Leave out `QUOTH_PERSONAL_BASELINE` on the first run. Code run from a mounted `src/` finds
+built-in sets (`"builtin": "no-memory"`) in the `eval/` directory beside it, hence the
+`/eval` mount. The snapshot directory must hold the
 snapshot's `.manifest.json` too. Without the `QUOTH_PERSONAL_*` variables (as in CI and a
 plain `uv run pytest`) the test is skipped.
 
