@@ -357,6 +357,10 @@ Paths default under `$QUOTH_HOME`; the Hermes `state.db` under `$HERMES_HOME`.
 | `--episodes-tick-seconds S` | 60 | CPU budget of one lane tick |
 | `--prefetch-log DIR` | off | record-only JSON lines per turn, per evidence job (start, submitted or busy, wait, return, done) and per search tool call: hashes, ids, locators, scores, config and timings, never the query or excerpt text ([EVAL.md](EVAL.md#online-measurement-the-prefetch-log)); on in the [s6 template](../deploy/s6/quoth-sidecar/run) under `$QUOTH_HOME/prefetch-log` |
 | `--prefetch-log-days N` | 30 | prune log files older than N days |
+| `--capture-misses DIR` | off | **private, opt-in**: keeps the owner's question text of likely misses (the assistant searched memory within the window after a turn) in `DIR/misses.jsonl` (0600, directory 0700), on this host only, for `quoth eval review` ([EVAL.md](EVAL.md#mining-real-questions)); not in the s6 template |
+| `--capture-misses-window S` | 180 | seconds after a turn (and before the session's next one) in which a search marks it a likely miss |
+| `--capture-misses-days N` | 30 | prune captured candidates older than N days |
+| `--capture-misses-max N` | 500 | keep at most N candidates (oldest pruned first) |
 | `--vault-min-cosine X\|off` | 0.53 | relevance gate: vault cosine floor |
 | `--vault-max-gap X\|off` | 0.15 | relevance gate: most a vault hit may sit below the turn's top hit |
 | `--vault-lexical-rescue`, `--claims-min-cosine`, `--claims-min-lexical` | off | further relevance-gate rules (`off` turns any gate rule off) |

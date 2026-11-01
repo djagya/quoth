@@ -192,8 +192,9 @@ class Quoth:
                  episode_min_score: float = EPISODE_MIN_SCORE, episodes_prefetch: bool = False,
                  owner_episodes=None, owner_min_score: float = OWNER_MIN_SCORE,
                  owner_prefetch: bool = True, prefetch_log=None, gate: relevance.Gate | None = None,
-                 reranker=None):
+                 reranker=None, miss_capture=None):
         self.prefetch_log = prefetch_log  # PrefetchLog or None (off)
+        self.miss_capture = miss_capture  # miss_capture.MissCapture or None (off): holds question text
         self.gate = relevance.default_gate() if gate is None else gate  # Gate() turns it off
         self.reranker = reranker  # rerank.RerankService or None (off)
         self._last_query_at = float("-inf")
@@ -283,6 +284,8 @@ class Quoth:
                "live_check": getattr(self.evidence, "live", None) is not None}
         if self.reranker is not None:
             out["reranker"] = self.reranker.status()
+        if self.miss_capture is not None:  # counts only: written, dropped, errors, tracked sessions
+            out["miss_capture"] = self.miss_capture.counters()
         return out
 
     def core(self, _body=None) -> dict:
@@ -339,6 +342,8 @@ class Quoth:
             # Empty, or a Hermes-injected turn (kanban wake, cron delivery, notice): nobody asked.
             if self.prefetch_log is not None and not dry:
                 self._log_skip(session_id)
+            if self.miss_capture is not None and not dry:
+                self.miss_capture.close_turn(session_id)
             return {"text": "", "claims": 0, "evidence": 0, "evidence_status": "skipped"}
         budget = self.evidence_budget
         if dry and evidence_budget is not None:
@@ -474,7 +479,28 @@ class Quoth:
             out["detail"]["timings_ms"] = trace["ms"]
         elif self.prefetch_log is not None:
             self._log_prefetch(query, session_id, trace, turn)
+        if not dry and self.miss_capture is not None:
+            self._capture_turn(query, session_id, trace)
         return out
+
+    def _capture_turn(self, query: str, session_id: str, trace: dict) -> None:
+        """Opt-in miss capture: remember what this turn injected, in memory, until the
+        session's next turn or the window ends (no file work on the request path)."""
+        try:
+            stores = trace["stores"]
+            vault = stores.get("vault", [])
+            self.miss_capture.turn(
+                session_id, query,
+                injected=[(v["locator"], v["_hit"].get("path")) for v in vault if v.get("injected")],
+                claims=[c["id"] for c in stores.get("claims", []) if c.get("injected")],
+                lanes={name: sum(1 for i in items if i.get("injected"))
+                       for name, items in stores.items() if name not in ("vault", "claims")},
+                vault_status=trace["status"].get("vault"),
+                pool_n=sum(1 for v in vault if v.get("pool")),
+                passed_n=sum(1 for v in vault if v.get("pool") and v.get("passed")),
+                snapshot_id=trace.get("snapshot_id"))
+        except Exception:
+            log.warning("miss capture record skipped")
 
     def _log_prefetch(self, query: str, session_id: str, trace: dict, turn: dict | None = None) -> None:
         """The turn returned (main-return event): what it served, joined to its job by `req`."""
@@ -1064,6 +1090,9 @@ class Quoth:
             raise SidecarError("invalid_evidence_request") from exc
         if not body.get("dry_run"):  # eval runs are not the assistant's searches
             self._log_tool("evidence_bundle", body, result)
+            if query is not None and self.miss_capture is not None:  # a search, not a path fetch
+                self.miss_capture.search(str(body.get("session_id") or ""), query, result.get("hits"),
+                                         (result.get("provenance") or {}).get("snapshot_id"))
         return result
 
     def mirror(self, body: dict) -> dict:
@@ -1107,6 +1136,8 @@ class Quoth:
         if self.prefetch_log is not None:
             self._censor_jobs()  # unresolved jobs end as `censored`, then the counters at close
             self.prefetch_log.close()
+        if self.miss_capture is not None:
+            self.miss_capture.close()
         self._close_episodes()
         self._evidence_pool.shutdown(wait=False, cancel_futures=True)
         if self._rerank_cancel is not None:
@@ -1899,6 +1930,16 @@ def main(argv=None) -> int:
                         "(hashes, ids, locators, scores, timings; no text). Off when omitted")
     p.add_argument("--prefetch-log-days", type=int, default=D.PREFETCH_LOG_DAYS,
                    help="prune prefetch log files older than this many days")
+    p.add_argument("--capture-misses", metavar="DIR",
+                   help="PRIVATE, opt-in: keep the owner's question text of likely misses (the assistant"
+                        " searched memory right after the turn) in DIR/misses.jsonl (0600) for"
+                        " `quoth eval review`. Off when omitted")
+    p.add_argument("--capture-misses-window", type=float, default=D.MISS_CAPTURE_WINDOW,
+                   help="seconds after a turn in which the assistant's search marks it a likely miss")
+    p.add_argument("--capture-misses-days", type=int, default=D.MISS_CAPTURE_DAYS,
+                   help="prune captured candidates older than this many days")
+    p.add_argument("--capture-misses-max", type=int, default=D.MISS_CAPTURE_MAX,
+                   help="keep at most this many captured candidates (oldest pruned first)")
     relevance.add_arguments(p)
     from . import rerank
     rerank.add_arguments(p)
@@ -1923,6 +1964,14 @@ def main(argv=None) -> int:
     if args.prefetch_log:
         from .prefetch_log import PrefetchLog
         prefetch_log = PrefetchLog(args.prefetch_log, days=args.prefetch_log_days)
+    miss_capture = None
+    if args.capture_misses:
+        from .miss_capture import MissCapture
+        try:
+            miss_capture = MissCapture(args.capture_misses, window=args.capture_misses_window,
+                                       days=args.capture_misses_days, max_entries=args.capture_misses_max)
+        except (OSError, ValueError) as exc:  # an optional recorder never stops the sidecar
+            log.warning("miss capture off: %s", type(exc).__name__)
     state_db = paths.hermes_state_db() if args.state_db is None else (args.state_db or None)
     app = Quoth(ledger_path=args.ledger or paths.state_file("ledger.db"), state_db=state_db,
                 evidence=evidence, core_dir=args.core_dir, model=args.model,
@@ -1931,7 +1980,7 @@ def main(argv=None) -> int:
                 episodes_prefetch=args.episodes_prefetch == "on",
                 owner_episodes=owner_episodes,
                 owner_min_score=args.owner_min_score, owner_prefetch=args.owner_prefetch == "on",
-                prefetch_log=prefetch_log, gate=gate, reranker=reranker)
+                prefetch_log=prefetch_log, gate=gate, reranker=reranker, miss_capture=miss_capture)
     server = SidecarServer(args.socket or default_socket(), app, mode=int(args.mode, 8))
     # The reranker loads in the background after bge-m3's warmup (two large loads at once
     # would compete for the CPU quota); turns keep the cosine gate until it is ready.

@@ -1,4 +1,4 @@
-"""`quoth eval run|validate|convert|compare|sweep|online|fixture`.
+"""`quoth eval run|validate|convert|compare|sweep|online|fixture|review`.
 
 Exit codes: 0 ok/pass, 1 regression (compare) or invalid set (validate), 2 unusable input
 or usage error, 3 run not comparable / gold drift excessive.
@@ -322,6 +322,23 @@ def _cmd_fixture(a) -> int:
     return 0
 
 
+def _cmd_review(a) -> int:
+    from .review import ReviewError, queue_stats, review
+    try:
+        if a.stats:
+            _print(queue_stats(a.queue))
+            return 0
+        if not a.out:
+            _err("review needs --out SET.jsonl (or --stats)")
+            return 2
+        summary = review(a.queue, a.out, db=a.db, fixture=a.fixture)
+    except (ReviewError, EvalSetError, OSError, ValueError) as exc:
+        _err(f"review failed: {exc}")
+        return 2
+    _print(summary)
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="quoth eval", description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -417,6 +434,14 @@ def main(argv=None) -> int:
     pf.add_argument("--out", required=True)
     pf.add_argument("--model", default="hash-ngram")
     pf.set_defaults(func=_cmd_fixture)
+
+    pq = sub.add_parser("review", help="review the sidecar's --capture-misses queue into a private set")
+    pq.add_argument("queue", help="the --capture-misses directory (or its misses.jsonl)")
+    pq.add_argument("--out", help="the private v2 set accepted rows are appended to (created when new)")
+    pq.add_argument("--db", help="serving snapshot or pointer: typed and picked paths must exist in it")
+    pq.add_argument("--fixture", default="private", help="manifest fixture of a new set")
+    pq.add_argument("--stats", action="store_true", help="counts by signal only (no text), then exit")
+    pq.set_defaults(func=_cmd_review)
 
     a = p.parse_args(argv)
     if a.cmd == "run" and not a.socket and not a.ledger and not a.fixture_dir:
