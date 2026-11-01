@@ -33,6 +33,9 @@ HERMES_FLAGS = {
     "--episodes-interval": _g(D.EPISODES_INTERVAL),
     "--episodes-tick-seconds": _g(D.EPISODES_TICK_SECONDS),
     "--prefetch-log-days": _g(D.PREFETCH_LOG_DAYS),
+    "--capture-misses-window": _g(D.MISS_CAPTURE_WINDOW),
+    "--capture-misses-days": _g(D.MISS_CAPTURE_DAYS),
+    "--capture-misses-max": _g(D.MISS_CAPTURE_MAX),
     "--vault-min-cosine": _g(D.GATE["vault_min_cosine"]),
     "--vault-max-gap": _g(D.GATE["vault_max_gap"]),
     "--rerank-budget": _g(D.RERANK_BUDGET),
@@ -136,6 +139,9 @@ def test_modules_read_their_numbers_from_recall_defaults():
     assert relevance.MAX_WIDEN == D.MAX_WIDEN and claim_index.MIN_SIMILARITY == D.CLAIM_INDEX_MIN_SIMILARITY
     assert episodes.EMBED_TICK_SECONDS == D.EPISODES_TICK_SECONDS
     assert prefetch_log.DEFAULT_DAYS == D.PREFETCH_LOG_DAYS
+    from quoth import miss_capture
+    assert (miss_capture.DEFAULT_WINDOW, miss_capture.DEFAULT_DAYS, miss_capture.DEFAULT_MAX) == (
+        D.MISS_CAPTURE_WINDOW, D.MISS_CAPTURE_DAYS, D.MISS_CAPTURE_MAX)
     assert set(D.GATE) == {f.name for f in __import__("dataclasses").fields(relevance.Gate)}
 
 

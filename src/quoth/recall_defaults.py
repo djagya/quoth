@@ -99,3 +99,6 @@ EPISODES_INTERVAL = 300.0       # seconds between lane ingest + embedding ticks
 EPISODES_TICK_SECONDS = 60.0    # CPU budget of one lane tick
 CLAIM_SYNC_INTERVAL = 60.0      # seconds between claim-index passes
 PREFETCH_LOG_DAYS = 30          # prefetch log files older than this are pruned
+MISS_CAPTURE_WINDOW = 180.0     # seconds after a turn in which a search marks a likely miss
+MISS_CAPTURE_DAYS = 30          # captured candidates older than this are pruned
+MISS_CAPTURE_MAX = 500          # at most this many candidates are kept (oldest go first)

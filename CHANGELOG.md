@@ -26,6 +26,16 @@ the `v*` tags.
 
 ### Evals
 
+- **Mining real questions (opt-in).** `quoth sidecar --capture-misses DIR` keeps the owner's
+  question text, on the host only (0600 file in a 0700 directory), for likely misses: the
+  assistant searched memory within 180 s after a turn that injected no vault evidence
+  (`searched_after_empty`), whose pool all failed the gate (`gate_rejected_pool`), or that
+  injected evidence anyway (`searched_despite_injection`). Candidates carry the injected and
+  search-returned paths as candidate gold, merge identical questions, and are capped at 500
+  and 30 days. `quoth eval review DIR --out SET` walks them in a terminal: pick the gold,
+  abstain with a reason, edit, reject (the text is deleted) or skip; accepted rows go to a
+  private v2 set as `real_user` rows with owner provenance. `--stats` prints counts only. The
+  prefetch log stays text-free. Off by default and not in the s6 template.
 - **Eval set v2.** Optional row fields, so every v1 row stays valid:
   - all-of evidence `groups` for questions that need several notes;
   - judged look-alike `negatives`;

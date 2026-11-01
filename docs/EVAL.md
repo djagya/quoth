@@ -13,6 +13,7 @@ CLI:
 | `quoth eval compare A B [--tolerances FILE]` | gate-style diff of two receipts |
 | `quoth eval sweep RECEIPT [--max-loss 0.01]` | replay relevance-gate thresholds on a receipt's candidates |
 | `quoth eval online --log DIR [--days N] [--since T] [--until T] [--max-turns N]` | aggregate readout of the sidecar's prefetch log, with the late-tail window report |
+| `quoth eval review QUEUE --out SET [--db SNAPSHOT]` / `--stats` | review the sidecar's captured misses into a private v2 set ([Mining real questions](#mining-real-questions)) |
 
 ```python
 from quoth.evals import load_set, validate, run_set, Receipt, InProcessTarget, compare
@@ -655,6 +656,73 @@ may look for something else than the turn did, so it is not answer quality nor t
 of an answer. Zero `admissible_nonempty` cases mean too little data, not that there is no
 problem, and no budget is safe because this report shows it fits: the measurement never
 changes the production budget.
+
+## Mining real questions
+
+The prefetch log can say *that* a turn probably missed, never *what* was asked. To turn real
+misses into eval rows, the sidecar can keep the question text of likely misses, and the
+owner reviews each one. It is off by default.
+
+`quoth sidecar … --capture-misses DIR [--capture-misses-window 180] [--capture-misses-days 30]
+[--capture-misses-max 500]`
+
+**What is captured.** Only an authored live turn (the owner's own words: `prefetch_query`
+text, capped as for the search) that the assistant follows, in the same session, with its own
+memory search (an `evidence_bundle` query; a path fetch or a dry run does not count) within
+the window and before that session's next prefetch. A turn nobody authored (a kanban wake, a
+cron delivery) closes the window. `signal` says what the turn did:
+
+| `signal` | The turn |
+|---|---|
+| `searched_after_empty` | injected no vault evidence: the pool was empty, or the vault was late, busy or unavailable (`vault_status`) |
+| `gate_rejected_pool` | injected no vault evidence though the pool had candidates: every one failed the relevance gate |
+| `searched_despite_injection` | injected vault evidence and the assistant still searched: possibly the wrong notes |
+
+A candidate holds an id, the time asked, the signal, the question, the injected locators and
+paths, the claims and lane excerpts injected (ids and counts, noted apart from the vault),
+the vault status and pool counts, the assistant's search queries (up to 3) with the top 5
+paths each returned (candidate gold for the reviewer), the snapshot id and the quoth version.
+Never the assistant's reply and never excerpt text.
+
+**Privacy.** The question text stays on the host: one file, `DIR/misses.jsonl`, mode 0600 in
+a 0700 directory (wider modes are repaired at start; a symlinked directory is refused), and
+nothing sends it anywhere. The prefetch log stays text-free, and receipts still hold ids and
+aggregates only. Identical questions (case and spacing aside) merge into one candidate
+(`seen` counts the repeats); candidates older than `--capture-misses-days` are pruned and at
+most `--capture-misses-max` are kept. The request path only updates a bounded in-memory map
+(256 sessions) and queues a record; one background thread writes the file under an advisory
+lock it shares with `eval review`. A full queue or an I/O error drops the candidate, so a turn
+is never slowed or broken.
+
+**Review.** `quoth eval review DIR --out real-misses.jsonl [--db SNAPSHOT]` walks the pending
+candidates in a terminal (plain prompts on stdin). Each shows the signal, the question, what
+was injected and the paths the searches returned, numbered:
+
+| Answer | Effect |
+|---|---|
+| `1` or `1,3` or `PROJECTS/x.md` (numbers and paths, comma-separated) | the gold notes; with more than one, it asks whether all are needed (`groups`) |
+| `a` | an abstain row: pick the `abstain_reason` |
+| `e` | edit the question text first (the row is then `review: edited`) |
+| `r` | reject: removed from the queue, text included |
+| `s` / `q` | skip (stays queued) / quit |
+
+It then asks the `kind` (default `fact`, `unanswerable` for abstain rows) and `lang` (a guess
+from the script). With `--db`, every gold path must exist in that snapshot. An accepted row is
+appended to the set at once (created with its manifest when new, always `private`; a public
+set is refused) and the candidate leaves the queue:
+
+```json
+{"id": "miss-3f2a…", "question": "…", "lang": "en", "kind": "fact", "origin": "real_user",
+ "asked_at": "2026-10-30T09:00:00.000+00:00",
+ "expect": {"abstain": false, "sources": [{"store": "vault", "match": {"path": "PROJECTS/x.md"}}]},
+ "tags": ["mined:miss-capture", "signal:searched_after_empty"],
+ "provenance": {"author": "owner", "review": "accepted", "created_at": "…", "reviewed_at": "…",
+                "mined_from": "miss-capture:searched_after_empty"},
+ "meta": {"snapshot_id": "<sha256>", "quoth_version": "0.17.1"}}
+```
+
+`quoth eval review DIR --stats` prints counts only (pending, by signal, merged repeats, oldest
+and newest): no question, query or path.
 
 ## The nightly gate and daily quality
 
