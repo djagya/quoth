@@ -1,0 +1,50 @@
+{
+  "counts": {
+    "abstain": {
+      "false": 416,
+      "true": 123
+    },
+    "abstain_reason": {
+      "false_premise": 35,
+      "near_miss": 40,
+      "not_in_vault": 48
+    },
+    "groups": 47,
+    "kind": {
+      "decision": 8,
+      "episodic": 30,
+      "fact": 267,
+      "followup": 12,
+      "knowledge_update": 13,
+      "person": 28,
+      "preference": 20,
+      "project_state": 6,
+      "temporal": 32,
+      "unanswerable": 123
+    },
+    "lang": {
+      "en": 281,
+      "ru": 258
+    },
+    "origin": {
+      "synthetic": 539
+    },
+    "review": {
+      "accepted": 528,
+      "edited": 11
+    },
+    "split": {
+      "dev": 227,
+      "test": 312
+    }
+  },
+  "fixture": "eval/bench",
+  "privacy": "public",
+  "rows": 539,
+  "schema": "quoth-evalset/v2",
+  "sha256": "673e215825ff7d9f6b4fe3ff09ae5b5fe54294a8b77b26c399639e515e4faab3",
+  "source": {
+    "generator": "llm, blind-checked",
+    "vault": "eval/bench/vault"
+  }
+}

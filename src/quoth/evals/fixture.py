@@ -5,10 +5,13 @@ A fixture directory (``eval/public`` is the shipped one) holds only text:
 - ``vault/``              Markdown notes, indexed by the normal ingest + embed path
 - ``ledger-seed.jsonl``   ``{text, kind, status, subject_key?, origin?, locator?}`` applied in
                           order (``accepted`` / ``pending`` / ``rejected``; same subject_key
-                          accepted later supersedes the earlier claim)
+                          accepted later supersedes the earlier claim); optional
 - ``telegram.jsonl``      ``{id, session, source, role, ts, text}`` Hermes messages, written
-                          into a ``state.db`` with Hermes' schema by `build_state_db`
+                          into a ``state.db`` with Hermes' schema by `build_state_db`; optional
 - ``set.jsonl``           the eval set (+ ``set.manifest.json``)
+
+A vault-only fixture (``eval/bench``) leaves out the seed and the messages: its ledger and
+lanes are built empty, so every store still exists and only the vault holds evidence.
 
 `build_fixture` writes the binaries into a work directory, never into the source tree.
 """
@@ -29,6 +32,8 @@ CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, role TE
 
 
 def _jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []  # an optional store source: built empty
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 

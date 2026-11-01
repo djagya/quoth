@@ -1,0 +1,11 @@
+{
+  "schema": "quoth-evalsuite/v1",
+  "name": "bench",
+  "description": "The public retrieval benchmark on the synthetic persona vault (eval/bench). The test split is the capability number (paired tests, intervals); thresholds are tuned on the dev split only. The no-memory set guards false injection. Numbers mean something with BGE-M3; with the hash embedder (CI) the suite checks plumbing.",
+  "fixture": "eval/bench",
+  "sets": [
+    {"id": "bench-test", "path": "../sets/bench/set.jsonl", "role": "quality", "split": "test"},
+    {"id": "bench-dev", "path": "../sets/bench/set.jsonl", "role": "tune", "split": "dev"},
+    {"id": "no-memory", "builtin": "no-memory", "role": "regression"}
+  ]
+}
