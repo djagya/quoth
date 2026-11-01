@@ -97,8 +97,10 @@ def record(row: dict, candidates: dict, sources: list, timings: dict | None = No
                     item["rerank_ms"] = it["rerank_ms"]
             items.append(item)
         stores[store] = {"expected": len(wanted), "items": items}
+    # The query's content-word count, for the short-query rule (receipts before 0.18 lack
+    # it: a replay then skips that rule).
     out = {"abstain": bool(row["expect"]["abstain"]), "answerable": bool(sources),
-           "has_stale": bool(stale), "stores": stores}
+           "has_stale": bool(stale), "terms": len(query_terms), "stores": stores}
     dense = [(timings or {}).get(k) for k in ("vault", "claims_dense")]
     if dense[0] is not None and any("rerank" in it for it in stores["vault"]["items"]):
         # The row's evidence search time: live scoring also ends at the evidence deadline.
@@ -113,11 +115,11 @@ def _rerank(items: list[dict]) -> list | None:
     return [it.get("rerank") for it in items] if any("rerank" in it for it in items) else None
 
 
-def _passes(gate: relevance.Gate, store: str, items: list[dict]) -> list[bool]:
+def _passes(gate: relevance.Gate, store: str, items: list[dict], terms: int | None = None) -> list[bool]:
     if store == "vault":
         signals = [{"cosine": it["score"], "lexical": it.get("lexical"), "matched": it.get("matched", 0),
                     "named": bool(it.get("named"))} for it in items]
-        return [ok for ok, _ in relevance.decide_vault(gate, signals, PREFETCH_EVIDENCE, _rerank(items))]
+        return [ok for ok, _ in relevance.decide_vault(gate, signals, PREFETCH_EVIDENCE, _rerank(items), terms)]
     if store == "claims":
         return [gate.claim(it["score"], it.get("lexical"), it.get("rerank"))[0] for it in items]
     return [True] * len(items)
@@ -141,7 +143,7 @@ def observe(row_id: str, rec: dict, gate: relevance.Gate) -> dict:
     for store in STORES:
         st = rec["stores"].get(store) or {"expected": 0, "items": []}
         items = st["items"]
-        passed = _passes(gate, store, items)
+        passed = _passes(gate, store, items, rec.get("terms"))
         chosen = _injected(gate, store, items, passed)
         ranks = [next((p for p, (it, ok) in enumerate(zip(items, passed), 1) if ok and i in it.get("match", ())),
                       None)
@@ -276,7 +278,8 @@ def vault_grid(rows: dict, cosines=None, gaps=VAULT_GAPS, rescues=VAULT_RESCUES)
     out = []
     for c, g, r in product(cosines, gaps, rescues):
         if c is not None or g is not None:  # a rescue alone gates nothing (and is refused)
-            out.append(relevance.Gate(vault_min_cosine=c, vault_max_gap=g, vault_lexical_rescue=r))
+            out.append(relevance.Gate(vault_min_cosine=c, vault_max_gap=g, vault_lexical_rescue=r,
+                                      **{k: D.GATE[k] for k in relevance.SHORT_FIELDS}))
     return out
 
 

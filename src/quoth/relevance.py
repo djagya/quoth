@@ -137,7 +137,9 @@ class Gate:
     Vault: a hit passes when its lexical coverage reaches ``vault_lexical_rescue`` with at
     least RESCUE_MIN_TERMS words, else when its cosine is at least ``vault_min_cosine``
     and at most ``vault_max_gap`` below the turn's top hit. A rescue without a floor or a
-    gap would gate nothing and is refused. Claims: a dense match passes at
+    gap would gate nothing and is refused. A short query (at most ``vault_short_terms``
+    content words) additionally needs the hit to hold one of its words or to reach
+    ``vault_short_min_cosine``; set both or neither. Claims: a dense match passes at
     ``claims_min_cosine``, a word-only match at ``claims_min_lexical`` coverage; either
     path also passes on the other's bar. An item without a score is never dropped.
     """
@@ -153,8 +155,16 @@ class Gate:
     vault_max_rerank_gap: float | None = None
     vault_rerank_widen: float | None = None
     claims_min_rerank: float | None = None
+    # Short-query rule (0.18, recall_defaults.GATE); left out of `to_dict` while None too.
+    vault_short_terms: float | None = None
+    vault_short_min_cosine: float | None = None
 
     def __post_init__(self):
+        short = (self.vault_short_terms, self.vault_short_min_cosine)
+        if (short[0] is None) != (short[1] is None):
+            raise ValueError("vault_short_terms and vault_short_min_cosine go together")
+        if short[0] is not None and (short[0] != int(short[0]) or short[0] < 0):
+            raise ValueError("vault_short_terms must be a whole number of words, 0 or more")
         if self.vault_lexical_rescue is not None and not self.vault_on:
             raise ValueError("vault_lexical_rescue needs vault_min_cosine or vault_max_gap")
         widen = self.vault_rerank_widen
@@ -186,13 +196,15 @@ class Gate:
 
     def vault(self, cosine: float | None, top: float | None, lexical: float | None,
               matched: int = 0, rerank: float | None = None, rerank_top: float | None = None,
-              named: bool = False) -> tuple[bool, str]:
+              named: bool = False, query_terms: int | None = None) -> tuple[bool, str]:
         """(passes, reason) for one vault hit; `top` is the turn's best vault cosine,
         `matched` how many query words the hit holds; `rerank` its rerank score when the
         turn's hits are scored (None: the cosine rules apply), `rerank_top` the best one;
         `named`: the query names the hit's note exactly (`retrieval.named_paths`), which
         passes the cosine floor and gap (reason ``name``). Hybrid retrieval brings in
-        lexical-only hits; below the floor this is the only way one reaches the block."""
+        lexical-only hits; below the floor this is the only way one reaches the block.
+        `query_terms`: how many content words the query has (None: unknown, the short-query
+        rule is skipped)."""
         if self.rerank_on and rerank is not None:
             if self.vault_min_rerank is not None and rerank < self.vault_min_rerank:
                 return False, "rerank_floor"
@@ -213,6 +225,10 @@ class Gate:
             return False, "below_floor"
         if self.vault_max_gap is not None and top is not None and round(top - cosine, 4) > self.vault_max_gap:
             return False, "gap"
+        if (self.vault_short_terms is not None and query_terms is not None
+                and query_terms <= self.vault_short_terms and not matched
+                and cosine < self.vault_short_min_cosine):
+            return False, "short_query"
         return True, "cosine"
 
     def claim(self, cosine: float | None, lexical: float | None, rerank: float | None = None) -> tuple[bool, str]:
@@ -232,7 +248,8 @@ class Gate:
         return (True, "lexical") if words else (False, "weak_words")
 
     def to_dict(self) -> dict:
-        return {k: v for k, v in asdict(self).items() if v is not None or k not in RERANK_FIELDS}
+        return {k: v for k, v in asdict(self).items()
+                if v is not None or k not in RERANK_FIELDS + SHORT_FIELDS}
 
     def status(self) -> dict:
         """Thresholds plus whether each store is actually gated (`/v1/health`)."""
@@ -262,6 +279,7 @@ class Gate:
 
 
 RERANK_FIELDS = ("vault_min_rerank", "vault_max_rerank_gap", "vault_rerank_widen", "claims_min_rerank")
+SHORT_FIELDS = ("vault_short_terms", "vault_short_min_cosine")
 MAX_WIDEN = D.MAX_WIDEN
 
 
@@ -302,6 +320,9 @@ def add_arguments(parser) -> None:
                                     f" {D.PREFETCH_EVIDENCE} by rerank score (off: rerank the"
                                     f" {D.PREFETCH_EVIDENCE} served hits, keep cosine order)"),
         ("claims_min_rerank", float, "inject a meaning-matched claim only at or above this rerank score"),
+        ("vault_short_terms", int, "a query of at most this many content words is short: its vault hits"
+                                   " must hold one of its words or reach --vault-short-min-cosine"),
+        ("vault_short_min_cosine", float, "the cosine a short query's vault hit needs without a shared word"),
     )
     for name, kind, text in rules:
         parser.add_argument("--" + name.replace("_", "-"), type=_threshold(kind), default=D.GATE[name],
@@ -329,7 +350,7 @@ def judge_vault(gate: Gate, query_terms: frozenset[str], hits: list[dict], k: in
         out.append({"lexical": lexical, "matched": matched})
     signals = [{"cosine": h.get("cosine"), "lexical": j["lexical"], "matched": j["matched"],
                 "named": bool(h.get("named"))} for h, j in zip(hits, out)]
-    for j, (passed, reason) in zip(out, decide_vault(gate, signals, k, rerank)):
+    for j, (passed, reason) in zip(out, decide_vault(gate, signals, k, rerank, len(query_terms))):
         j.update(passed=passed, gate=reason)
     if rerank is not None:
         for i, j in enumerate(out):
@@ -345,16 +366,18 @@ def rerank_usable(gate: Gate, rerank: list | None, n: int, k: int) -> bool:
     return depth > 0 and len(rerank) >= depth and all(r is not None for r in rerank[:depth])
 
 
-def decide_vault(gate: Gate, items: list[dict], k: int, rerank: list | None = None) -> list[tuple[bool, str]]:
+def decide_vault(gate: Gate, items: list[dict], k: int, rerank: list | None = None,
+                 query_terms: int | None = None) -> list[tuple[bool, str]]:
     """(passes, reason) per vault hit, in cosine order; `items` carry cosine, lexical and
-    matched. The sidecar and `eval sweep` both decide through here."""
+    matched; `query_terms` is the query's content-word count (None: unknown). The sidecar
+    and `eval sweep` both decide through here."""
     cosines = [it["cosine"] for it in items if it["cosine"] is not None]
     top = max(cosines) if cosines else None
     scores = rerank if rerank_usable(gate, rerank, len(items), k) else None
     rerank_top = max(scores[:min(gate.rerank_depth(k), len(items))]) if scores else None
     return [gate.vault(it["cosine"], top, it.get("lexical"), it.get("matched") or 0,
                        scores[i] if scores and i < len(scores) else None, rerank_top,
-                       bool(it.get("named")))
+                       bool(it.get("named")), query_terms)
             for i, it in enumerate(items)]
 
 

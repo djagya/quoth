@@ -115,7 +115,8 @@ def test_flags_round_trip_through_argparse():
     assert relevance.from_args(p.parse_args([])) == relevance.default_gate()
     assert relevance.default_gate().flags() == []
     assert relevance.from_args(p.parse_args(Gate().flags())) == Gate()
-    assert Gate().flags() == ["--vault-min-cosine", "off", "--vault-max-gap", "off"]
+    assert Gate().flags() == ["--vault-min-cosine", "off", "--vault-max-gap", "off",
+                              "--vault-short-terms", "off", "--vault-short-min-cosine", "off"]
     assert Gate.from_dict(gate.to_dict()) == gate and Gate.from_dict(None) == Gate()
     assert gate.label() == "vault-min-cosine=0.52 vault-max-gap=0.08 claims-min-lexical=0.34"
     assert Gate().label() == "no gate"
@@ -408,3 +409,54 @@ def test_evidence_scores_survive_a_shortened_bundle(snapshot_db, monkeypatch):
         assert [(h["locator"], h["cosine"]) for h in short] == [(h["locator"], h["cosine"]) for h in full[1:]]
     finally:
         evidence.snapshot.close()
+
+
+# ------------------------------------------------------------------ short queries
+
+SHORT = Gate(vault_min_cosine=0.53, vault_max_gap=0.15, vault_short_terms=2, vault_short_min_cosine=0.65)
+
+
+@pytest.mark.parametrize("cosine, matched, terms, named, expected", [
+    (0.60, 0, 1, False, (False, "short_query")),  # "thanks": close in meaning to many notes
+    (0.60, 0, 0, False, (False, "short_query")),  # only stopwords
+    (0.60, 1, 2, False, (True, "cosine")),        # "Peru trip?": the hit holds a query word
+    (0.66, 0, 1, False, (True, "cosine")),        # close enough without a shared word
+    (0.60, 0, 1, True, (True, "name")),           # the query names the note
+    (0.60, 0, 3, False, (True, "cosine")),        # not short
+    (0.60, 0, None, False, (True, "cosine")),     # word count unknown (an old receipt)
+    (0.50, 1, 1, False, (False, "below_floor")),  # the floor still applies
+])
+def test_short_queries_need_a_shared_word_or_a_high_cosine(cosine, matched, terms, named, expected):
+    assert SHORT.vault(cosine, 0.66, 0.0, matched, named=named, query_terms=terms) == expected
+
+
+def test_short_rule_thresholds_go_together():
+    with pytest.raises(ValueError):
+        Gate(vault_min_cosine=0.5, vault_short_terms=2)
+    with pytest.raises(ValueError):
+        Gate(vault_min_cosine=0.5, vault_short_min_cosine=0.6)
+    with pytest.raises(ValueError):
+        Gate(vault_min_cosine=0.5, vault_short_terms=1.5, vault_short_min_cosine=0.6)
+    assert relevance.default_gate().vault_short_terms == 2
+
+
+def test_short_queries_skip_unrelated_hits_live_and_in_replay(tmp_path, state_db):
+    hits = [{**h, "cosine": c} for h, c in zip(HITS, (0.60, 0.58, 0.56, 0.40))]
+    app = _app(tmp_path, state_db, SHORT, hits)
+    try:
+        # "thanks a lot": no content word in any hit, every cosine below 0.65.
+        out = app.prefetch({"query": "thanks a lot", "dry_run": True, "k_candidates": 4})
+        assert out["evidence"] == 0
+        assert {c["gate"] for c in out["detail"]["candidates"]["vault"]} <= {"short_query", "below_floor", "gap"}
+        # A short query that shares a word with a note still gets it.
+        out = app.prefetch({"query": "sourdough?", "dry_run": True, "k_candidates": 4})
+        assert "a.md:1-2" in out["text"]
+        row = {"id": "r", "question": "thanks a lot", "lang": "en", "kind": "unanswerable",
+               "origin": "synthetic", "expect": {"abstain": True, "sources": []}}
+        live = app.prefetch({"query": row["question"], "dry_run": True, "k_candidates": 4})
+        rec = SW.record(row, live["detail"]["candidates"], [])
+        assert rec["terms"] == len(relevance.terms("thanks a lot"))
+        assert SW.observe("r", rec, SHORT)["block"] == 0
+        assert SW.observe("r", {**rec, "terms": None}, SHORT)["block"] > 0  # old receipt: rule skipped
+    finally:
+        app.close()
