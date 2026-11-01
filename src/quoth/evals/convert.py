@@ -5,6 +5,11 @@
 - ``golden-v3``: the frozen private-v3 package rows (``V3_KEYS``).
 - ``ledger-updates``: knowledge-update steps plus ``query``, ``current`` and ``stale``; the
   steps become a ledger seed for the fixture, the query a ``knowledge_update`` row.
+- ``private-v2``: the private gate runner's ``real-questions-v2.jsonl`` (``{id, question,
+  expected_paths}`` plus optional ``kind``, ``lang``, ``origin``, ``asked_at`` and anything
+  else, kept under ``meta``). Rows are the owner's real questions: origin ``real_user``
+  unless a row records its own, provenance author ``owner``. Rows without expected paths, or
+  of an adversarial/unanswerable kind (which the runner never scored), become abstain rows.
 
 Nothing here prints row content. Private input stays private: the output inherits
 ``--privacy private`` by default and is written mode 0600.
@@ -16,7 +21,7 @@ from pathlib import Path
 
 from .format import KINDS, sha256_bytes, vault_paths, write_set
 
-FORMATS = ("golden-v1", "golden-v3", "ledger-updates")
+FORMATS = ("golden-v1", "golden-v3", "ledger-updates", "private-v2")
 V1_KEYS = {"id", "question", "lang", "expected_paths", "kind"}
 V3_META = ("domain", "post_snapshot", "source_kind", "temporal_kind", "expected_event")
 V3_KEYS = {"id", "question", "lang", "kind", "expected_paths", "answer_hint", "abstain", "asked_at",
@@ -24,6 +29,10 @@ V3_KEYS = {"id", "question", "lang", "kind", "expected_paths", "answer_hint", "a
 V3_PACKAGE_SCHEMA = "quoth-private-golden-package/v1"
 KIND_MAP = {"project": "project_state", "project-state": "project_state", "adversarial": "unanswerable"}
 ORIGINS_V3 = ("real_user", "assistant_query", "authored")
+PRIVATE_V2_KEYS = {"id", "question", "expected_paths"}
+PRIVATE_V2_ROW = {"id", "question", "expected_paths", "kind", "lang", "origin", "asked_at"}
+PRIVATE_V2_UNSCORED = ("adversarial", "unanswerable")
+PRIVATE_V2_LANG = "und"  # ISO 639 "undetermined", when a row records no language
 
 
 class ConvertError(ValueError):
@@ -127,6 +136,40 @@ def from_ledger_updates(rows: list[dict], origin: str = "synthetic") -> tuple[li
     return out, seed
 
 
+def from_private_v2(rows: list[dict], origin: str | None = None) -> list[dict]:
+    """The private runner's v2 rows as eval set v2 rows (see the module docstring)."""
+    from .format import ORIGINS
+    out = []
+    for r in rows:
+        if not PRIVATE_V2_KEYS <= set(r) or not isinstance(r["expected_paths"], list):
+            raise ConvertError(f"{r.get('id', '?')}: not a private-v2 row")
+        legacy = str(r.get("kind") or "fact")
+        kind, tags = _kind(legacy)
+        row_origin = r.get("origin")
+        if row_origin is not None:
+            row_origin = str(row_origin).replace("-", "_")
+            if row_origin not in ORIGINS:
+                raise ConvertError(f"{r['id']}: unknown private-v2 origin")
+        paths = list(r["expected_paths"])
+        meta = {k: v for k, v in r.items() if k not in PRIVATE_V2_ROW}
+        if legacy in PRIVATE_V2_UNSCORED or kind == "unanswerable":
+            # The runner never judged these rows; keep their paths out of the gold.
+            kind = "unanswerable"
+            if paths:
+                meta["unjudged_expected_paths"] = paths
+            paths = []
+        row = {"id": r["id"], "question": r["question"], "lang": r.get("lang") or PRIVATE_V2_LANG,
+               "kind": kind, "origin": row_origin or origin or "real_user", "tags": tags,
+               "provenance": {"author": "owner"},
+               "expect": {"abstain": not paths, "sources": _vault_sources(paths)}}
+        if r.get("asked_at") is not None:
+            row["asked_at"] = r["asked_at"]
+        if meta:
+            row["meta"] = meta
+        out.append(row)
+    return out
+
+
 def _v3_package_check(path: Path, raw: bytes) -> None:
     """When the private package manifest sits next to the input, its sha256 must match."""
     manifest = path.parent / "manifest.json"
@@ -187,6 +230,8 @@ def convert(fmt: str, src: str | Path, out: str | Path, *, privacy: str = "priva
     elif fmt == "golden-v3":
         _v3_package_check(src, raw)
         converted = from_golden_v3(rows)
+    elif fmt == "private-v2":
+        converted = from_private_v2(rows, origin=origin)
     else:
         converted, seed = from_ledger_updates(rows, origin=origin or "synthetic")
     manifest = write_set(converted, out, privacy=privacy, fixture=fixture,

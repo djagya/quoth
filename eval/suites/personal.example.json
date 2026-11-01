@@ -1,0 +1,12 @@
+{
+  "schema": "quoth-evalsuite/v1",
+  "name": "personal",
+  "description": "Example personal suite. Copy it next to your private sets (outside any repository) and point the paths at them. Sets converted with `quoth eval convert` carry fixture `private`, the fixture `refresh-nightly --suite` expects. Regression sets block a nightly switch on their tolerances and lost gold; quality sets block only when significantly worse; tune sets are never scored by the gate.",
+  "fixture": "private",
+  "sets": [
+    {"id": "real-questions", "path": "real-questions.evalset.jsonl", "role": "regression"},
+    {"id": "golden", "path": "golden-v3.evalset.jsonl", "role": "quality", "split": "test"},
+    {"id": "golden-dev", "path": "golden-v3.evalset.jsonl", "role": "tune", "split": "dev"},
+    {"id": "no-memory", "builtin": "no-memory", "role": "regression"}
+  ]
+}

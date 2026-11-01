@@ -103,6 +103,7 @@ manifest; a private set and its manifest are written with mode 0600.
 | `golden-v1` | `{id, question, lang, expected_paths, scope, kind}` rows (e.g. `eval/golden.jsonl`) | paths become vault sources; `adversarial` → `unanswerable`, `project` → `project_state`, unknown kinds → `fact`; the original kind and scope are kept as `legacy_kind:` and `scope:` tags; `--origin` (default `authored`) |
 | `golden-v3` | rows with `asked_at`, an origin (`real_user`, `assistant_query`, `authored`) and optional `answer_hint` | paths become vault sources; `project-state` → `project_state`; `answer_hint` → `expect.answer_hint`; `domain`, `post_snapshot`, `source_kind`, `temporal_kind`, `expected_event` → `meta`. When a package `manifest.json` sits next to the input, its `dataset.sha256` must match |
 | `ledger-updates` | `{id, steps, query, current, stale}` | a `knowledge_update` row with `current` as a claims source and `stale` as stale sources; the steps go to a ledger seed (`OUT.ledger-seed.jsonl` or `--seed-out`) |
+| `private-v2` | the private gate runner's `real-questions-v2.jsonl`: `{id, question, expected_paths}` plus optional `kind`, `lang`, `origin`, `asked_at` | paths become vault sources; origin `real_user` unless the row records one (`--origin` overrides the default); provenance author `owner`; a missing `lang` is `und`; kinds map as for golden-v1. Rows the runner never scored (no expected paths, or kind `adversarial`/`unanswerable`) become abstain rows, their paths kept as `meta.unjudged_expected_paths`; other keys go to `meta` |
 
 Both golden mappings have exact inverses, so converting back gives the original rows. Default
 privacy is `private`; pass `--privacy public` only for synthetic input.
@@ -262,7 +263,8 @@ text. stderr reports how many rows matched and how many oracle ids the run did n
 (`quoth.evals.DEFAULT_TOLERANCES`: vault hit@5, hit@10 and recall@10 may not drop, vault MRR
 −0.02, injected hit and MRR −0.02, injected precision −0.05, abstain_nonempty +0.05,
 stale_leak +0, claims hit@5 −0.02, lanes hit@5 −0.05, wall p95 +50 %). Lost gold = ids with
-`vault_hit@10` true in A and false in B.
+`vault_hit@10` true in A and false in B; ids listed in `excused_lost_gold` do not count
+against `max_lost_gold` (the result lists them under `excused_lost_gold`).
 
 **Paired tests.** Both receipts score the same rows, so `compare` also tests row by row over
 the receipts' `items` (`quoth.evals.stats`) and reports them under `paired`:
@@ -338,6 +340,53 @@ messages in English and Russian that need no recall (chit-chat, general knowledg
 writing tasks, questions about the assistant). Every row abstains, so its
 `abstain_nonempty_rate` is the false-injection rate on any vault. Read it next to an
 answerable set: a gate that never injects scores perfectly here.
+
+### Personal suite
+
+Your own sets (converted with `eval convert`, so their fixture is `private`) go in a suite
+file kept with them, outside any repository;
+[`eval/suites/personal.example.json`](../eval/suites/personal.example.json) shows one: the
+real-questions set as `regression`, a golden set's test split as `quality` and its dev split
+as `tune`, plus the built-in no-memory set as `regression`. The same file drives the nightly
+gate (`refresh-nightly --suite`, [below](#the-nightly-suite-gate)) and a pytest hook:
+
+`tests/test_personal_suite.py` (marker `personal`) scores the suite on one snapshot exactly
+as the nightly gate scores each side (`evals.suite.run_suite_on_snapshot`: in-process,
+vault store only, every evidence call awaited, gold drift against the snapshot; tune sets
+skipped). It runs only when its variables are set and skips otherwise:
+
+| Variable | Meaning |
+|---|---|
+| `QUOTH_PERSONAL_SUITE` | the suite file (required) |
+| `QUOTH_PERSONAL_DB` | the frozen snapshot or serving pointer to score (required) |
+| `QUOTH_PERSONAL_BASELINE` | optional: an earlier suite-run directory; the run must `suite compare` to it with exit 0, by the nightly gate's rules (latency not gated) |
+| `QUOTH_PERSONAL_OUT` | optional: keep a copy of this run there, the baseline of a later run |
+| `QUOTH_PERSONAL_MODEL` | optional: embedding model (default `bge-m3`) |
+
+A baseline can also be the `candidate/` directory of a nightly `SWITCH`
+(`<receipts>/suite-runs/<receipt id>/candidate`): that run scored the snapshot now served.
+Outputs go to pytest's temporary directory; the test prints set ids, roles and aggregates
+only. Run it in the Docker image with the real model, the code under test mounted over the
+installed package (replace the `/path/to/...` placeholders with your own directories):
+
+```sh
+docker run --rm --entrypoint python \
+  -v "$PWD/src:/src:ro" -e PYTHONPATH=/src \
+  -v "$PWD/tests:/app/tests:ro" -v "$PWD/pyproject.toml:/app/pyproject.toml:ro" \
+  -v quoth_quoth-models:/models:ro -e QUOTH_MODEL_CACHE=/models \
+  -v /path/to/personal-sets:/personal:ro \
+  -v /path/to/snapshot-dir:/snapshot:ro \
+  -v /path/to/baselines:/baselines \
+  -e QUOTH_PERSONAL_SUITE=/personal/suite.json \
+  -e QUOTH_PERSONAL_DB=/snapshot/serving.db \
+  -e QUOTH_PERSONAL_OUT=/baselines/next \
+  -e QUOTH_PERSONAL_BASELINE=/baselines/previous \
+  quoth:017 -m pytest -q -s -p no:cacheprovider -m personal tests/test_personal_suite.py
+```
+
+Leave out `QUOTH_PERSONAL_BASELINE` on the first run. The snapshot directory must hold the
+snapshot's `.manifest.json` too. Without the `QUOTH_PERSONAL_*` variables (as in CI and a
+plain `uv run pytest`) the test is skipped.
 
 ## Relevance gate and `eval sweep`
 
@@ -726,12 +775,72 @@ and newest): no question, query or path.
 
 ## The nightly gate and daily quality
 
-`quoth refresh-nightly` scores the serving snapshot and the successor, and once a day the
-served snapshot, with `quoth.evals.gate`:
+`quoth refresh-nightly` scores the serving snapshot and the successor on one of two gates:
+an eval suite (`--suite`, below), or the legacy gate set plus private runner
+(`--gate-set`, `--private-runner`, `--quality-set`), which also scores the served snapshot
+once a day. The two cannot be combined.
 
-- **Sets.** `--gate-set PATH` (required) is the gate's `synthetic` dataset. The
-  `--private-runner PATH` module and the `real-questions-v2.jsonl` file next to it form the
-  `private` dataset (see [FRESHNESS.md](FRESHNESS.md#the-private-gate-runner)).
+### The nightly suite gate
+
+```sh
+quoth refresh-nightly --pointer POINTER --vault VAULT --staging DIR --receipts DIR \
+  --suite /path/to/personal/suite.json [--suite-fixture private]
+```
+
+- **Sets.** The suite's `smoke`, `regression` and `quality` sets; `tune` sets are not
+  scored (listed under `suite.skipped`). The suite's `fixture` must be `--suite-fixture`
+  (default `private`, what `eval convert` writes for sets of your own vault), and every set
+  the suite's fixture or `any` (the built-in no-memory set), so a set written for the public
+  fixture never gates a real vault. A suite that does not load or check fails the run before
+  anything is built (`suite_invalid`), on unchanged-vault days too.
+- **Scoring.** Each snapshot is scored with `run_suite_on_snapshot`: per set, `eval run`
+  on an in-process sidecar over the snapshot (an empty in-memory ledger, so the vault store
+  only; one shared BGE-M3, 2 threads; every evidence call awaited) with gold drift resolved
+  against that snapshot. Snapshots, sets, manifests, tolerance files and the scoring code
+  are hashed before and after (`eval_snapshot_changed`, `eval_inputs_changed`,
+  `eval_code_changed`).
+- **Decision.** `eval suite compare` of the serving snapshot's run (A) and the successor's
+  (B), with each set's tolerances (the suite's or the entry's file, else the defaults):
+
+| Role | Holds the switch when | Reason |
+|---|---|---|
+| `smoke`, `regression` | a tolerance fails, or a row loses its vault gold (`max_lost_gold`) | `suite_<id>_regressed` |
+| `quality` | a paired test (vault hit@10, injected hit, abstain injections, all@10) is significantly worse, or a stale value leaks | `suite_<id>_quality_worse` |
+| `tune` | never scored | – |
+
+  Latency rules (`latency_ms.*`) are not gated: the two runs share the machine with other
+  work. In `content` mode (only vault content changed, as for the legacy gate) every
+  `max_drop` is at least 0.03 and a row that loses its gold is excused when this refresh
+  changed or deleted one of its gold notes. A set the gate cannot compare (missing on one
+  side, not `ok`) fails the run (`suite_incomparable`); more than 10 % stale rows in a set,
+  or fewer than 30 left after drops, on either side, fails it as `gold_drift_excessive`.
+- **Receipt.** The nightly receipt's `suite` block: `name`, `fixture`, `sha256`, `roles`,
+  `skipped`, `result`, `problems`, `runs` (the run directory, relative to `--receipts`) and,
+  per set, `role`, `result`, `failed_checks` (metric paths), `paired` (each test's counts,
+  `p`, `significant`, `direction`), `quality_failed_on`, and the `current` and `candidate`
+  headlines (scored rows, vault hit@10 and MRR, injected hit rate, abstain-nonempty rate,
+  `ci95`). `lost_gold_ids` and `excused_lost_gold` are keyed by set id; `gate` is
+  `quoth-nightly-suite/v1` with its `mode`. The per-set run receipts and `compare.json` stay
+  in `<receipts>/suite-runs/<receipt id>/` (`current/`, `candidate/`; the newest 14 runs are
+  kept), so `quoth eval suite compare` can replay a decision.
+- **Quality.** The suite's quality sets are measured with the gate, on days the vault
+  changed; there is no separate daily serving-quality run (`serving_quality: {status:
+  not_measured, reason: suite_gate}`).
+
+Moving from the legacy flags: convert the runner's set with `quoth eval convert --from
+private-v2 real-questions-v2.jsonl real-questions.evalset.jsonl`, list it (and the former
+`--gate-set` and `--quality-set` sets) in a suite, check it with `quoth eval suite validate`,
+and replace the three flags with `--suite`.
+
+### The legacy gate
+
+Unchanged, for installs that still pass these flags. `--private-runner` is deprecated (it
+executes a Python file): receipts record `deprecated: ["private_runner"]`, and a run at a
+terminal prints a note on stderr; a scheduled run stays silent.
+
+- **Sets.** `--gate-set PATH` (required with `--private-runner`) is the gate's `synthetic`
+  dataset. The `--private-runner PATH` module and the `real-questions-v2.jsonl` file next to
+  it form the `private` dataset (see [FRESHNESS.md](FRESHNESS.md#the-private-gate-runner)).
   `--quality-set PATH` (optional) fills the daily quality's `golden_v3` block.
 - **Retrieval.** One dry-run prefetch per row on an in-process sidecar over each snapshot (an
   empty in-memory ledger, one shared BGE-M3, 2 threads, no download). A row whose evidence
@@ -743,9 +852,9 @@ served snapshot, with `quoth.evals.gate`:
   more than 10 % stale rows in a dataset, or fewer than 30 rows left after drops, fails
   the run (`gold_drift_excessive`).
 
-Receipts: `quoth-nightly/v1` (switch decision), `quoth-serving-quality/v1` (daily quality),
-`quoth-heartbeat/v1`. They hold aggregates and item ids only. The gate rules are in
-[FRESHNESS.md](FRESHNESS.md#nightly-refresh).
+Receipts: `quoth-nightly/v1` (switch decision, both gates), `quoth-serving-quality/v1`
+(daily quality, legacy gate), `quoth-heartbeat/v1`. They hold aggregates and item ids only.
+The legacy gate's rules are in [FRESHNESS.md](FRESHNESS.md#the-gate).
 
 ## Control lab
 

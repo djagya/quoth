@@ -347,14 +347,17 @@ def main(argv=None) -> int:
     pv.add_argument("set")
     pv.set_defaults(func=_cmd_validate)
 
-    pc = sub.add_parser("convert", help="convert golden-v1 / golden-v3 / ledger-updates to eval set v1")
-    pc.add_argument("--from", dest="fmt", required=True, choices=("golden-v1", "golden-v3", "ledger-updates"))
+    from .convert import FORMATS
+    pc = sub.add_parser("convert", help="convert golden-v1 / golden-v3 / ledger-updates / private-v2 to an eval set")
+    pc.add_argument("--from", dest="fmt", required=True, choices=FORMATS,
+                    help="private-v2: the private gate runner's real-questions-v2.jsonl")
     pc.add_argument("input")
     pc.add_argument("output")
     pc.add_argument("--privacy", choices=("public", "private"), default="private")
     pc.add_argument("--fixture", default="private", help="the fixture (store set) the rows target")
     pc.add_argument("--origin", choices=("real_user", "assistant_query", "authored", "synthetic"),
-                    help="origin for formats that do not record one (default authored; synthetic for ledger-updates)")
+                    help="origin for formats that do not record one (default authored; synthetic for"
+                         " ledger-updates; real_user for private-v2)")
     pc.add_argument("--seed-out", help="ledger-updates: where to write the ledger seed")
     pc.set_defaults(func=_cmd_convert)
 

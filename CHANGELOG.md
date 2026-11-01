@@ -60,6 +60,31 @@ the `v*` tags.
   real-vault snapshot, prefetch injected vault excerpts into 41% of them (95% interval 32–50%),
   mostly short conversational turns: 11 of 12 thanks, 13 of 20 greetings, 8 of 10 questions
   about the assistant, but 1 of 24 general-knowledge questions.
+- **`eval convert --from private-v2`** turns the private gate runner's
+  `real-questions-v2.jsonl` into an eval set v2 (origin `real_user` unless a row records
+  one, provenance author `owner`, fixture `private`). Rows the runner never scored
+  (no expected paths, adversarial or unanswerable kinds) become abstain rows.
+- **Personal suite hook**: `tests/test_personal_suite.py` (marker `personal`) scores the
+  suite in `QUOTH_PERSONAL_SUITE` on the snapshot in `QUOTH_PERSONAL_DB` the way the nightly
+  gate does, and with `QUOTH_PERSONAL_BASELINE` requires `suite compare` exit 0 against an
+  earlier run; skipped when the variables are unset. `eval/suites/personal.example.json`
+  shows a personal suite. `eval compare` tolerances accept `excused_lost_gold` (ids whose
+  lost gold does not count).
+
+### Nightly
+
+- **`refresh-nightly --suite SUITE`** gates the successor on an eval suite instead of a
+  gate set plus a private runner: both snapshots are scored on the suite's sets and compared
+  set by set. A failing `smoke` or `regression` set holds the switch (`suite_<id>_regressed`),
+  a `quality` set only when a paired test is significantly worse (`suite_<id>_quality_worse`);
+  `tune` sets are not scored, latency is not gated. Content-only refreshes keep the legacy
+  gate's allowances (drops up to 0.03, lost gold excused when its note changed). The suite's
+  fixture must be `private` (or `--suite-fixture NAME`). The receipt's `suite` block holds
+  headlines with 95% intervals and the paired tests per set; the per-set run receipts stay in
+  `<receipts>/suite-runs/<receipt id>/` (newest 14 kept). No Python file is executed.
+- `--gate-set`, `--private-runner` and `--quality-set` work as before but cannot be combined
+  with `--suite`. `--private-runner` is deprecated: receipts record `deprecated:
+  ["private_runner"]`, and a run at a terminal prints a note (a scheduled run stays silent).
 
 ## 0.17.1 — one hit per note in the prefetch pool, nightly self-check fix
 
