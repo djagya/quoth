@@ -7,7 +7,9 @@ comparable or B is invalid (different set, B gold drift excessive, B not scored)
 Tolerances are a JSON document; every metric is addressed by a dotted path into the
 receipt (``metrics.overall.stores.vault.hit@10``). Rules per metric: ``max_drop``
 (higher is better), ``max_rise`` (lower is better), ``max_rise_ratio`` (relative rise,
-for latency). A metric missing on either side is reported, never failed.
+for latency). A metric missing on either side is reported, never failed. ``max_lost_gold``
+bounds the rows that hit in A and miss in B; ids listed in ``excused_lost_gold`` do not
+count against it (the nightly gate excuses rows whose gold note this refresh changed).
 
 `paired` adds row-by-row significance tests over the receipts' per-row items
 (`stats.paired`: exact McNemar for hits, a sign-flip permutation test for reciprocal ranks).
@@ -107,7 +109,8 @@ def compare(a: Receipt | dict, b: Receipt | dict, tolerances: dict | None = None
     items_b = (b.get("items") or {}).get("vault_hit@10", {})
     lost = sorted(i for i, hit in items_a.items() if hit and items_b.get(i) is False)
     gained = sorted(i for i, hit in items_a.items() if not hit and items_b.get(i) is True)
-    lost_fail = len(lost) > int(tol.get("max_lost_gold", 0))
+    excused = set(tol.get("excused_lost_gold") or ())
+    lost_fail = len([i for i in lost if i not in excused]) > int(tol.get("max_lost_gold", 0))
     if problems:
         result, code = "incomparable", 3
     elif lost_fail or any(c["result"] == "fail" for c in checks):
@@ -115,8 +118,8 @@ def compare(a: Receipt | dict, b: Receipt | dict, tolerances: dict | None = None
     else:
         result, code = "pass", 0
     return {"schema": "quoth-eval-compare/v1", "result": result, "exit": code, "problems": problems,
-            "lost_gold": lost, "gained_gold": gained, "gold_drift": {"a": a.get("gold_drift"),
-                                                                    "b": b.get("gold_drift")},
+            "lost_gold": lost, "excused_lost_gold": [i for i in lost if i in excused],
+            "gained_gold": gained, "gold_drift": {"a": a.get("gold_drift"), "b": b.get("gold_drift")},
             "checks": checks, "paired": _paired(a, b, float(tol.get("paired_alpha", 0.05)))}
 
 

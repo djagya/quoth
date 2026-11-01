@@ -285,12 +285,14 @@ def test_cli_real_subprocess_fail_line_and_receipt(tmp_path):
         capture_output=True, text=True, cwd=Path(__file__).resolve().parents[1],
         env={'PYTHONPATH': str(Path(__file__).resolve().parents[1] / 'src')})
     assert result.returncode == 1
+    # The legacy flags still work; off a terminal the deprecation is in the receipt only.
     assert not result.stderr
     lines = result.stdout.splitlines()
     assert len(lines) == 2
     assert lines[0].startswith('FAIL quoth-nightly receipt=')
     receipt = Path(lines[0].split('receipt=', 1)[1])
     assert json.loads(receipt.read_text())['outcome'] == 'FAIL'
+    assert json.loads(receipt.read_text())['deprecated'] == ['private_runner']
     assert lines[1] == ('RED quoth-heartbeat serving_pointer_invalid,last_run_fail,'
                         'freshness_unconfirmed')
     beat = json.loads((tmp_path / 'heartbeat.json').read_text())

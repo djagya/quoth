@@ -78,7 +78,7 @@ def test_interrupted_nightly_reuses_exact_target_and_committed_batch(tmp_path):
     assert set(saved) == {'schema', 'gate', 'outcome', 'reasons', 'seconds', 'receipt_id',
         'old', 'candidate', 'resumed_from', 'current_metrics', 'candidate_metrics', 'eval',
         'lost_gold_ids', 'gate_mode', 'excused_lost_gold', 'new', 'self_check', 'removed',
-        'serving_quality', 'recorded_at'}
+        'serving_quality', 'recorded_at', 'deprecated'}
     assert 'Synthetic evidence' not in json.dumps(saved)
 
 

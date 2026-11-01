@@ -258,8 +258,10 @@ until the pointer is fixed. Requests never validate. See
 ```sh
 quoth refresh-nightly --pointer "$QUOTH_HOME/staging/serving.db" --vault /abs/vault \
   --staging "$QUOTH_HOME/staging" --receipts "$QUOTH_HOME/refresh/receipts" \
-  --gate-set /private/gate.evalset.jsonl --private-runner /private/runner.py \
-  [--quality-set /private/quality.evalset.jsonl]
+  --suite /private/suite.json
+# legacy gate (deprecated runner):
+#   ... --gate-set /private/gate.evalset.jsonl --private-runner /private/runner.py \
+#       [--quality-set /private/quality.evalset.jsonl]
 ```
 
 | Flag | Default | Meaning |
@@ -268,9 +270,11 @@ quoth refresh-nightly --pointer "$QUOTH_HOME/staging/serving.db" --vault /abs/va
 | `--vault DIR` | required | the vault |
 | `--staging DIR` | required | where successors and their checkpoints are built |
 | `--receipts DIR` | required | run receipts (directory 0700, files 0600) |
-| `--gate-set SET` | required | eval set v1 the gate scores both snapshots on; write it against your own vault and keep it private |
-| `--private-runner PATH` | required | the private gate scorer (below) |
-| `--quality-set SET` | off | eval set v1 for the daily serving-quality block |
+| `--suite SUITE` | – | the eval suite the gate scores both snapshots on ([EVAL.md](EVAL.md#the-nightly-suite-gate)); replaces the three legacy flags below and cannot be combined with them |
+| `--suite-fixture NAME` | `private` | the fixture the suite must declare (only with `--suite`) |
+| `--gate-set SET` | legacy, required without `--suite` | eval set the legacy gate scores both snapshots on; write it against your own vault and keep it private |
+| `--private-runner PATH` | legacy, required without `--suite` | the private gate scorer (below); deprecated |
+| `--quality-set SET` | off | legacy: eval set for the daily serving-quality block |
 | `--deadline-seconds S` | 3000 | internal wall-clock budget (> 0, ≤ 3000) |
 | `--heartbeat PATH` | `<receipts>/../heartbeat.json` | heartbeat written after every run |
 | `--allow-index-contract-rebase` | off | one operator-run build across a declared rebase |
@@ -292,7 +296,8 @@ A run:
    exception class, or `probe_not_json`), never with the error's text;
 7. after a successful check, deletes older frozen `nightly-*` outputs in staging, keeping the
    current, the previous and the last held candidate;
-8. records the day's serving quality, writes the receipt and the heartbeat.
+8. records the day's serving quality (legacy gate), writes the receipt and the heartbeat;
+   with `--suite`, keeps the newest 14 suite-run directories under `<receipts>/suite-runs/`.
 
 | Outcome | Meaning | Prints | Exit |
 |---|---|---|---|
@@ -308,9 +313,13 @@ contains questions, note paths or text.
 
 ### The gate
 
-The gate compares the successor with the serving snapshot on two datasets: `synthetic` (the
-`--gate-set`) and `private` (the runner's set). It runs in one of two modes, recorded as
-`gate_mode`:
+With `--suite`, the gate compares the two snapshots set by set on the suite, with the same
+two modes below (content mode floors each tolerance drop at 0.03 and excuses lost gold the
+same way); see [EVAL.md](EVAL.md#the-nightly-suite-gate) for its roles, reasons and receipt.
+
+The legacy gate compares the successor with the serving snapshot on two datasets:
+`synthetic` (the `--gate-set`) and `private` (the runner's set). It runs in one of two
+modes, recorded as `gate_mode`:
 
 | Mode | When | Rule |
 |---|---|---|
@@ -323,6 +332,11 @@ are used in memory only. The thresholds are `GATE`, `CONTENT_TOLERANCE` and `CON
 `nightly.py`. Scoring details: [EVAL.md](EVAL.md#the-nightly-gate-and-daily-quality).
 
 ### The private gate runner
+
+Deprecated: convert its set with `quoth eval convert --from private-v2` and gate with
+`--suite` instead ([EVAL.md](EVAL.md#the-nightly-suite-gate)); the suite gate executes no
+Python file. Runs that still pass it record `deprecated: ["private_runner"]` in the receipt
+and, at a terminal only, print a note on stderr.
 
 `--private-runner PATH` names a Python file that is executed (never imported, so no
 `__pycache__` is written beside it). It must define:
@@ -372,7 +386,9 @@ set, the gate set and, with `--quality-set`, the `golden_v3` block: hit@5, hit@1
 recall@10, the abstain rows' non-empty count, latency p50/p95). Later runs that day reuse the
 result while the code, inputs and vault inventory are unchanged (`cached`). A quality failure
 is recorded as unavailable; it never changes the switch decision. The block lives in the
-nightly receipt under `serving_quality` (`quoth-serving-quality/v1`).
+nightly receipt under `serving_quality` (`quoth-serving-quality/v1`). With `--suite` there
+is no daily run: the suite's quality sets are reported with the gate on build days, and
+`serving_quality` is `{"status": "not_measured", "reason": "suite_gate"}`.
 
 ### Limits
 

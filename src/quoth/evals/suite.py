@@ -15,7 +15,7 @@ written for. Outputs hold ids and aggregates only, like every receipt.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 import os
@@ -128,6 +128,12 @@ def load_entry(suite: Suite, entry: Entry) -> EvalSet:
     return evalset.select(entry.split)
 
 
+def without_roles(suite: Suite, roles=("tune",)) -> Suite:
+    """The suite without its entries of `roles` (the nightly gate and the personal hook
+    never score `tune` sets)."""
+    return replace(suite, entries=[e for e in suite.entries if e.role not in roles])
+
+
 def _headline(receipt: dict) -> dict:
     metrics = receipt.get("metrics") or {}
     overall = metrics.get("overall") or {}
@@ -163,9 +169,26 @@ def run_suite(suite: Suite, target, out_dir: str | Path, *, run_set_fn=None, **r
     return summary
 
 
-def compare_suites(a_dir: str | Path, b_dir: str | Path, suite: Suite | None = None) -> dict:
+def run_suite_on_snapshot(suite: Suite, db: str | Path, out_dir: str | Path, *, embedder=None,
+                          model: str = "bge-m3", evidence_budget: float | None = None) -> dict:
+    """Score `suite` on one frozen snapshot the way `refresh-nightly --suite` does: an
+    in-process sidecar over `db` with an empty in-memory ledger (the vault store only),
+    every evidence call awaited, gold drift resolved against the snapshot. The personal
+    pytest hook runs this too, so personal and public sets are scored the same way.
+    `embedder`: an already loaded model for `model`, shared across snapshots."""
+    from .gate import GATE_EVIDENCE_BUDGET, SnapshotScorer
+    budget = GATE_EVIDENCE_BUDGET if evidence_budget is None else evidence_budget
+    with SnapshotScorer(Path(db), embedder=embedder, model=model, evidence_budget=budget) as scorer:
+        # Prefetch only: the gate compares what turns inject, not the explicit search.
+        return run_suite(suite, scorer.target, out_dir, gold_drift=True, explicit=False)
+
+
+def compare_suites(a_dir: str | Path, b_dir: str | Path, suite: Suite | None = None, *,
+                   tolerances_for=None) -> dict:
     """Compare two suite runs set by set. Exit: 0 pass, 1 a regression (or a significantly
-    worse quality set), 3 not comparable (a set missing on one side, or not comparable)."""
+    worse quality set), 3 not comparable (a set missing on one side, or not comparable).
+    `tolerances_for(set id, tolerances) -> tolerances` adjusts each set's tolerances (the
+    nightly gate's content mode)."""
     a_dir, b_dir = Path(a_dir), Path(b_dir)
     sa = json.loads((a_dir / "suite.json").read_text(encoding="utf-8"))
     sb = json.loads((b_dir / "suite.json").read_text(encoding="utf-8"))
@@ -183,6 +206,8 @@ def compare_suites(a_dir: str | Path, b_dir: str | Path, suite: Suite | None = N
             continue
         entry = entries.get(sid)
         tol = load_tolerances(entry.tolerances) if entry and entry.tolerances else base_tol
+        if tolerances_for is not None:
+            tol = tolerances_for(sid, tol or load_tolerances(None))
         res = compare(Receipt.load(a_dir / meta["receipt"]).data,
                       Receipt.load(b_dir / sb["sets"][sid]["receipt"]).data, tol)
         if role == "quality" and res["exit"] == 1:
