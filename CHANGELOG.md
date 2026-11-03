@@ -3,7 +3,12 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
-## Unreleased
+## 0.18.0 — eval set v2 and suites, a public benchmark, quieter short messages
+
+No index change: 0.17 snapshots keep serving, no rebuild. Install the release and restart
+the sidecar. The short-message gate rule is on by default; miss capture and the suite gate
+are opt-in (`--capture-misses`, `refresh-nightly --suite`), and the nightly's old gate flags
+keep working.
 
 ### Recall
 
