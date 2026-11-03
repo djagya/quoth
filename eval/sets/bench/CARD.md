@@ -81,9 +81,9 @@ edited`:
 
 The other 528 rows are `review: accepted`. Every row has `reviewed_by:
 ["llm:claude-opus-5.5:blind-checker"]`. `SPOTCHECK.md` lists 40 rows (seeded, stratified by row
-type and language) for the owner's review; the set becomes v2 of this card once they are read.
+type and language) for the owner's review; the owner reviewed them on 2026-11-03 and changed none.
 
-**Baseline** (quoth after 0.17.1, with the unreleased short-message rule at its tuned default; BGE-M3, dense retrieval, the serving
+**Baseline** (quoth 0.18.0, with the short-message rule at its tuned default; BGE-M3, dense retrieval, the serving
 gate and evidence budget, 4 CPUs, 2026-11-01). Rates over answerable rows unless said; 95%
 Wilson intervals in brackets.
 
@@ -140,3 +140,5 @@ no-memory set.
 
 **Version history.** v1 (2026-11-01): first version; 72 notes, 539 rows, blind-checked,
 owner spot check pending.
+v1.1 (2026-11-03): the owner's spot check of 40 rows found no row to change; the short-message
+rule retuned (baseline above).
