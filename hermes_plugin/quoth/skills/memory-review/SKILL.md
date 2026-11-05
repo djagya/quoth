@@ -90,7 +90,7 @@ it in the grammar.
 | The owner says | You do (`approval_quote` = their whole reply, verbatim) |
 |---|---|
 | "ok" | `action=apply ids=[ids of every item shown except "your call"]` |
-| "ok, drop 3 5" | first `action=reject ids=[ids of 3 and 5]`, then `action=apply` for the rest |
+| "ok, drop 3 5" | first `action=apply` for the rest, then `action=reject ids=[ids of 3 and 5]` (apply first, so a copy of 3 or 5 is confirmed and drops with it) |
 | "3: new text" | `action=edit id=<id of 3> text=<new text> kind=<item kind>`; combine with ok/drop as said |
 | "skip" | nothing; from now on pass `action=digest topic=<next topic in topics you have not skipped>` |
 | "stop" | nothing; say what remains |
