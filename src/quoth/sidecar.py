@@ -1031,7 +1031,16 @@ class Quoth:
                     raise SidecarError("bucket_changed")
                 if len(ids) > ledger.BUCKET_CAP:
                     raise SidecarError("bucket_too_large")
-            if used["decisions"] + len(ids) > ledger.BUCKET_CAP:
+            # A drop also rejects its family's restored copies: they count against the cap too.
+            if action == "reject":
+                dropping = ids
+            elif action == "apply":
+                dropping = [cid for cid in ids if (ledger.current_suggestion(self.conn, cid) or {})
+                            .get("action") in ledger.JUNK_BUCKETS]
+            else:
+                dropping = []
+            family = ledger.family_rejects(self.conn, dropping) - set(ids)
+            if used["decisions"] + len(ids) + len(family) > ledger.BUCKET_CAP:
                 raise SidecarError("approval_cap_reached")
             if action == "apply":
                 applied = ledger.apply_suggestions(self.conn, ids, note=note, batch=locator)
@@ -1058,8 +1067,7 @@ class Quoth:
                                             batch=locator)
                     else:
                         out = ledger.undo_auto_accept(self.conn, claim_id, batch=locator)
-                results.append(_claim_view(out) | ({"restored_duplicates": out["restored_duplicates"]}
-                                                   if out.get("restored_duplicates") else {}))
+                results.append(_claim_view(out) | ({"family": out["family"]} if "family" in out else {}))
             except ledger.LedgerRejected as exc:
                 errors.append({"id": claim_id, "error": exc.code})
         return {"action": action, "approval_locator": locator, "results": results, "errors": errors}

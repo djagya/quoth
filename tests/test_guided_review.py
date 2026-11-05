@@ -134,7 +134,8 @@ def test_suggest_topic_covered_and_resuggest(ledger):
     assert core.presort_summary(ledger) == {"covered": 1, "none": 1}
     out = core.apply_suggestions(ledger, [a, b], batch="hermes:tg1:9")
     assert out[0] == {"id": a, "applied": "covered", "result_id": a, "review_status": "rejected",
-                      "text": "Ari drinks green tea."}
+                      "text": "Ari drinks green tea.",
+                      "family": {"root": a, "ids": [], "rejected_now": [], "already_rejected": []}}
     assert out[1] == {"id": b, "error": "no_suggestion"}
     assert core.get(ledger, a)["review_note"] == "already in notes: FOOD/tea.md:3-4"
 
@@ -198,7 +199,7 @@ def test_duplicate_applies_only_when_its_target_stays(ledger):
     assert core.kept_target(ledger, s)["id"] == out[s]["result_id"]
 
 
-def test_dropping_an_original_brings_its_duplicates_back(ledger):
+def test_dropping_an_original_drops_its_confirmed_copies(ledger):
     t, d1, d2 = _seed(ledger, "Original T.", "Copy one of T.", "Copy two of T.")
     core.suggest(ledger, t, action="accept", by="assistant", suggested_kind="taste")
     for d in (d1, d2):
@@ -206,23 +207,21 @@ def test_dropping_an_original_brings_its_duplicates_back(ledger):
     # Bulk clean-up in one reply drops the copies while T still waits with an accept suggestion.
     core.apply_suggestions(ledger, [d1, d2], batch="hermes:tg1:2")
     assert core.claim_events(ledger, d1, detail=True)[-1]["detail"] == {"batch": "hermes:tg1:2", "duplicate_of": t}
-    # A later round drops T itself: its copies come back for review in the same transaction.
+    # A later round drops T itself: the owner confirmed the copies as the same fact, so they stay dropped.
+    events = len(core.claim_events(ledger, d1))
     out = core.reject(ledger, t, batch="hermes:tg1:4")
-    assert out["review_status"] == "rejected" and out["restored_duplicates"] == [d1, d2]
+    assert out["review_status"] == "rejected" and "restored_duplicates" not in out
+    assert out["family"] == {"root": t, "ids": [d1, d2], "rejected_now": [], "already_rejected": [d1, d2]}
     for d in (d1, d2):
-        assert core.get(ledger, d)["review_status"] == "pending"
-        assert core.claim_events(ledger, d, detail=True)[-1] == {
-            "at": core.claim_events(ledger, d)[-1]["at"], "action": "restored", "actor": "owner",
-            "detail": {"batch": "hermes:tg1:4", "target_dropped": t}}
-    # Their suggestion still points at the dropped original, so they are never applied blind again.
-    assert [r.get("error") for r in core.apply_suggestions(ledger, [d1])] == ["duplicate_target_not_kept"]
-    # Undoing the earlier clean-up finds them changed; undoing T's drop brings T back.
-    assert {e["id"] for e in core.undo_batch(ledger, "hermes:tg1:2")["errors"]} == {d1, d2}
+        assert core.get(ledger, d)["review_status"] == "rejected"
+    assert len(core.claim_events(ledger, d1)) == events  # already rejected: no new event
+    # Undoing T's drop brings T back; its copies were decided under the earlier batch and stay.
     core.undo_batch(ledger, "hermes:tg1:4")
     assert core.get(ledger, t)["review_status"] == "pending"
+    assert {core.get(ledger, d)["review_status"] for d in (d1, d2)} == {"rejected"}
 
 
-def test_apply_then_drop_in_one_reply_keeps_the_copy(provider, served, state_db):
+def test_apply_then_drop_in_one_reply_drops_the_copy_too(provider, served, state_db):
     app, _ = served
     with app.lock:
         t, d, t2, d2 = _seed(app.conn, "Original T.", "Copy of T.", "Original U.", "Copy of U.")
@@ -230,13 +229,15 @@ def test_apply_then_drop_in_one_reply_keeps_the_copy(provider, served, state_db)
     _call(provider, "review_claims", action="suggest", id=d, suggestion="duplicate", duplicate_of=t, topic="Home")
     reply = "ok, drop 1"
     say(state_db, reply)
-    # The assistant applies first and rejects second (the skill says the other way round): still nothing lost.
+    # The assistant applies first and rejects second (the skill says the other way round): the copy
+    # was confirmed as T's duplicate, so dropping T keeps it dropped.
     applied = _call(provider, "review_claims", action="apply", ids=[d], approval_quote=reply)
     assert applied["results"][0]["review_status"] == "rejected"
     dropped = _call(provider, "review_claims", action="reject", ids=[t], approval_quote=reply)
-    assert dropped["results"][0]["restored_duplicates"] == [d]
+    assert dropped["results"][0]["family"] == {"root": t, "ids": [d], "rejected_now": [],
+                                               "already_rejected": [d]}
     with app.lock:
-        assert core.get(app.conn, d)["review_status"] == "pending"
+        assert core.get(app.conn, d)["review_status"] == "rejected"
     # The same through apply: the original's suggestion was changed to reject.
     _call(provider, "review_claims", action="suggest", id=t2, suggestion="accept", kind="taste")
     _call(provider, "review_claims", action="suggest", id=d2, suggestion="duplicate", duplicate_of=t2)
@@ -245,7 +246,9 @@ def test_apply_then_drop_in_one_reply_keeps_the_copy(provider, served, state_db)
     _call(provider, "review_claims", action="apply", ids=[d2], approval_quote="ok")
     _call(provider, "review_claims", action="suggest", id=t2, suggestion="reject")
     out = _call(provider, "review_claims", action="apply", ids=[t2], approval_quote="ok")
-    assert out["results"][0]["restored_duplicates"] == [d2]
+    assert out["results"][0]["family"]["already_rejected"] == [d2]
+    with app.lock:
+        assert core.get(app.conn, d2)["review_status"] == "rejected"
 
 
 def test_assist_does_not_yield_to_its_own_turn(provider, served):

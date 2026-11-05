@@ -5,6 +5,20 @@ the `v*` tags.
 
 ## Unreleased
 
+### Review
+
+- **Dropping a memory drops its confirmed duplicates.** An owner's reject (`reject`, or
+  `apply` of a junk suggestion) no longer brings back the copies the owner had earlier
+  confirmed as its duplicates. The whole family goes in the same transaction and under the
+  same approval: copies already rejected stay rejected, and copies that are pending only
+  because the system restored them are rejected again (`family_of`), so `undo` returns them
+  with the original. The family is transitive (copies of copies). Pending `duplicate`
+  suggestions, copies the owner decided again, and accepted claims are never touched. Reject
+  results carry `family: {root, ids, rejected_now, already_rejected}` in place of
+  `restored_duplicates`, and the re-rejects count toward the 200-decision approval cap.
+  Expiry by age and latest-wins still restore copies: the owner never decided those.
+- The memory-review skill (3.4.0) reports a drop as "Dropped #X and its N confirmed copies."
+
 ### Evals
 
 - `eval sweep` judges configs against the live gate, not against no gate. The reference is

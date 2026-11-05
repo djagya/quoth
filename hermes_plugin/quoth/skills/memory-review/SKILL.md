@@ -1,7 +1,7 @@
 ---
 name: memory-review
 description: "Use when the owner asks to review memory, or answers a memory-review nudge: presort the Quoth queue yourself, then walk the owner through it topic by topic in short numbered rounds and apply exactly what they answer."
-version: 3.3.0
+version: 3.4.0
 author: quoth
 ---
 
@@ -105,9 +105,10 @@ is empty.
 
 After each reply, report one line: "Done: 7 remembered, 2 dropped, 1
 edited. 41 left (about 5 rounds)." List refused ids with their error.
-When a result lists `restored_duplicates`, add: "N duplicates came back
-because their original was dropped" (they return to review). Then send
-the next round.
+A dropped memory takes its confirmed copies with it: each reject result
+carries `family` (`ids` = its confirmed copies). When `family.ids` is not
+empty, say so: "Dropped #X and its N confirmed copies." Then send the next
+round.
 
 ## 5. After the review
 
