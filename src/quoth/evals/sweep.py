@@ -449,9 +449,13 @@ def sweep(receipts, *, reference: str = DEFAULT_REFERENCE, max_loss: float = DEF
     budget_ms, evidence_ms = rerank_budget * 1000, evidence_budget * 1000
     sets = []
     for name, receipt in pairs:
-        rows = rows_of(receipt)
+        prefix = f"{name}: " if len(pairs) > 1 else ""
+        try:
+            rows = rows_of(receipt)
+        except SweepError as exc:
+            raise SweepError(f"{prefix}{exc}") from None
         if not rows:
-            raise SweepError(f"receipt {name} has no scored rows" if len(pairs) > 1 else "receipt has no scored rows")
+            raise SweepError(f"{prefix}receipt has no scored rows")
         gate = reference_gate(receipt, reference)
         obs, times = _observations(rows, gate, budget_ms, evidence_ms)
         sets.append({"name": name, "receipt": receipt, "rows": rows, "gate": gate, "obs": obs, "times": times,

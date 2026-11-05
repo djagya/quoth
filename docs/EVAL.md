@@ -11,7 +11,7 @@ CLI:
 | `quoth eval run SET [--split dev\|test] …` | score a set against the real prefetch path and write a receipt |
 | `quoth eval suite validate\|run\|compare …` | run every set of a suite on one target, and compare two suite runs set by set ([Suites](#suites)) |
 | `quoth eval compare A B [--tolerances FILE]` | gate-style diff of two receipts |
-| `quoth eval sweep RECEIPT [--max-loss 0.01]` | replay relevance-gate thresholds on a receipt's candidates |
+| `quoth eval sweep [NAME=]RECEIPT… [--reference live\|none] [--max-loss 0.01] [--max-lost-hits N]` | replay relevance-gate thresholds on receipts' candidates, against the live gate |
 | `quoth eval online --log DIR [--days N] [--since T] [--until T] [--max-turns N]` | aggregate readout of the sidecar's prefetch log, with the late-tail window report |
 | `quoth eval review QUEUE --out SET [--db SNAPSHOT]` / `--stats` | review the sidecar's captured misses into a private v2 set ([Mining real questions](#mining-real-questions)) |
 
@@ -441,37 +441,60 @@ sidecar would (judge the pool, inject the best that pass) and scores each config
 harness metrics. Its time budgets default to the sidecar's (`--evidence-budget 1.5`,
 `--rerank-budget 0.8`). Ranked metrics count an
 expected source only if it passes the gate. Default grids: vault floors in 0.01 steps over the
-recorded scores × gaps (off, 0.02–0.2) × rescues (off, 0.5, 0.75, 1.0), each with the
-default short-query rule (receipts from before 0.18 lack the query's word count, so a replay
-of one skips that rule); claim floors in 0.01
-steps × word shares (off, 0.25–1.0); then the 5 best of each combined. `--vault-cosines`,
-`--vault-gaps`, `--vault-rescues`, `--claims-cosines`, `--claims-lexicals` override a grid
-(comma lists, `none` = off).
+recorded scores × gaps (off, 0.02–0.2) × rescues (off, 0.5, 0.75, 1.0); claim floors in
+0.01 steps × word shares (off, 0.25–1.0); then the 5 best of each combined.
+`--vault-cosines`, `--vault-gaps`, `--vault-rescues`, `--claims-cosines`, `--claims-lexicals`
+override a grid (comma lists, `none` = off). No grid sweeps the short-query rule: every
+config, vault, rerank or claims, keeps the reference's (the serving default's when the
+reference has none; receipts from before 0.18 lack the query's word count, so a replay of
+one skips that rule). Vault configs also keep the reference's claims rules, and claims
+configs its vault rules, so a claims pick never silently turns the vault floor off.
 
-A config is eligible when the injected hit rate and the vault's and claims' injected hit
-rates each lose at most `--max-loss` (default 0.01) against no gate. The recommendation
-maximizes injected precision + (1 − abstain_nonempty_rate), then hits, then keeps the most
-items and sets the fewest thresholds. The table shows the vault floor curve, the best
-eligible configs and the recommended sidecar flags (every threshold that differs from the
-serving default, `off` included); `--out` writes every config as JSON and
-`--format json` prints it. Output holds configs and aggregates only.
+**Reference.** Configs are judged against the gate that already runs. By default
+(`--reference live`) that is each receipt's recorded gate (`config.gate`, what the run
+served with), else the serving default (`recall_defaults.GATE`). A config is eligible
+when, against the reference, the injected hit rate and the vault's and claims' injected hit
+rates each lose at most `--max-loss` (default 0.01), abstain_nonempty_rate rises by at most
+`--max-loss`, and it loses at most `--max-lost-hits` (default 0) answerable rows the
+reference injects. The recommendation maximizes injected precision + (1 −
+abstain_nonempty_rate), then hits, then keeps the most items and sets the fewest
+thresholds, and it must beat the reference on the first three: when nothing does, the
+table says to keep the live gate and `recommended` is null. `--reference none` judges
+against no gate with no lost-row limit (the sweep up to 0.18.0); the no-gate row is
+reported either way. A receipt run with the gate off records no gate, so it is judged
+against no gate too: score the receipt with the gate you serve.
+
+**Several receipts.** `eval sweep R1 R2 …` (or `NAME=PATH`; a bare path is named by its
+file name) scores each config on every receipt against that receipt's reference. A config
+is eligible only when it is eligible on each receipt, and configs rank by the objective on
+the pooled rows. A pick tuned on one golden set can lose answers on another or raise
+false injection on the no-memory set; sweep them together, the no-memory set included.
+The table and `sets` in the JSON give each receipt's reference and recommended metrics
+(`lost_hits`, `gained_hits` against the reference); with several receipts each config also
+carries its verdict per receipt under `sets`.
+
+The table shows the vault floor curve, the best eligible configs (under the no-gate and
+the live rows) and the recommended sidecar flags (every threshold that differs from the
+serving default, `off` included); `--out` writes every config as JSON
+(`quoth-eval-sweep/v2`) and `--format json` prints it. Output holds configs and aggregates
+only.
 
 ```sh
 uv run quoth eval fixture --out /tmp/quoth-fixture
 uv run quoth eval run eval/public/set.jsonl --fixture-dir /tmp/quoth-fixture \
-    --episodes-prefetch on --gold-drift --vault-min-cosine off --vault-max-gap off \
-    --out /tmp/run.json --quiet
+    --episodes-prefetch on --gold-drift --out /tmp/run.json --quiet
 uv run quoth eval sweep /tmp/run.json --out /tmp/sweep.json
 # Check a pick: the same run with the flags, then compare.
 uv run quoth eval run eval/public/set.jsonl --fixture-dir /tmp/quoth-fixture \
-    --episodes-prefetch on --gold-drift --vault-min-cosine 0.35 --vault-max-gap off \
+    --episodes-prefetch on --gold-drift --vault-min-cosine 0.55 \
     --out /tmp/gated.json --quiet
 uv run quoth eval compare /tmp/run.json /tmp/gated.json
 ```
 
 For your own data, run `eval run SET --socket "$QUOTH_HOME/quoth.sock" --db SNAPSHOT
---gold-drift` against the live sidecar, sweep the receipt, and set the chosen flags on
-`quoth sidecar`.
+--gold-drift` against the live sidecar for each golden set and the no-memory set, sweep the
+receipts together (`quoth eval sweep golden=g.json regression=r.json no-memory=n.json`),
+and set the chosen flags on `quoth sidecar` only when it recommends one.
 
 ## Reranker
 

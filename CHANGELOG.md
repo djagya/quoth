@@ -3,6 +3,31 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
+## Unreleased
+
+### Evals
+
+- `eval sweep` judges configs against the live gate, not against no gate. The reference is
+  the receipt's recorded gate (`config.gate`), else the serving default. A config is
+  eligible only when it loses no answerable row the reference injects (`--max-lost-hits`,
+  default 0), keeps the injected hit rates within `--max-loss`, and does not raise
+  abstain_nonempty_rate by more than `--max-loss`. It is recommended only when it beats the
+  reference on the objective; otherwise the sweep says to keep the live gate. A sweep
+  against no gate could recommend a config worse than the gate already running.
+  `--reference none` keeps the old comparison.
+- `eval sweep R1 R2 …` (or `NAME=PATH`) sweeps several receipts at once: a config must be
+  eligible on each, configs rank on the pooled rows, and the output gives each receipt's
+  reference and recommended metrics. A pick tuned on one golden set can lose answers on
+  another or raise false injection on the no-memory set.
+- Rerank and claims configs keep the reference's short-query rule, and claims configs its
+  vault floor and gap. Before, rerank configs dropped the short-query rule and a claims
+  pick turned the vault gate off.
+- The sweep's JSON is now `quoth-eval-sweep/v2`. `lost_hits` and `loss` are measured
+  against the reference. New fields: `reference`, `reference_gate`, `max_lost_hits`,
+  `rows`, `gained_hits`, `abstain_rise`, and `sets` (per receipt; with several receipts
+  each config also carries its per-receipt verdict). `baseline` is still the no-gate row.
+  `receipt` is only present for a single receipt.
+
 ## 0.18.0 — eval set v2 and suites, a public benchmark, quieter short messages
 
 No index change: 0.17 snapshots keep serving, no rebuild. Install the release and restart

@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from quoth import recall_defaults as D
 from quoth import relevance, sidecar
 from quoth.evals import sweep as SW
 from quoth.relevance import Gate
@@ -318,10 +319,20 @@ def test_sweep_replay_math():
     assert hits == {"a": True, "b": False} and lossy["vault_hit@5"] == 0.5
 
 
-def test_sweep_recommends_the_best_config_within_the_loss_bound():
-    receipt = {"schema": "quoth-eval-run/v1", "set": {"sha256": "x"}, "code": {"version": "t"},
-               "config": {"k_candidates": 10}, "candidates": {"schema": SW.CANDIDATES_SCHEMA, "rows": ROWS}}
-    result = SW.sweep(receipt, vault_gaps=(None,), vault_rescues=(None,), claims_lexicals=(None,))
+def _receipt(rows, gate=None, k=10):
+    config = {"k_candidates": k, **({"gate": gate} if gate is not None else {})}
+    return {"schema": "quoth-eval-run/v1", "set": {"sha256": "x"}, "code": {"version": "t"},
+            "config": config, "candidates": {"schema": SW.CANDIDATES_SCHEMA, "rows": rows}}
+
+
+NARROW = {"vault_gaps": (None,), "vault_rescues": (None,), "claims_lexicals": (None,)}
+
+
+def test_sweep_against_no_gate_keeps_the_old_result():
+    """`--reference none` is the sweep up to 0.18.0: losses against no gate, no lost-row limit."""
+    result = SW.sweep(_receipt(ROWS), reference="none", **NARROW)
+    assert result["reference"] == "none" and result["max_lost_hits"] is None
+    assert result["reference_gate"] is result["baseline"] and result["baseline"]["gate"] == Gate().to_dict()
     floors = {r["gate"]["vault_min_cosine"]: r for r in result["vault"]}
     assert floors[0.49]["eligible"] and not floors[0.61]["eligible"] and floors[0.61]["lost_hits"] == 1
     rec = result["recommended"]
@@ -332,6 +343,116 @@ def test_sweep_recommends_the_best_config_within_the_loss_bound():
     assert result["flags"] == "--vault-min-cosine 0.49 --vault-max-gap off"
     text = SW.table(result)
     assert "Recommended: --vault-min-cosine 0.49 --vault-max-gap off" in text and "| no gate |" in text
+
+
+def test_sweep_recommends_nothing_that_does_not_beat_the_live_gate():
+    """On ROWS the serving gate (0.53, gap 0.15) already injects only the gold and nothing on
+    the abstain row; the old pick (floor 0.49) only ties it, so nothing is recommended."""
+    result = SW.sweep(_receipt(ROWS), **NARROW)
+    assert result["reference"] == "live" and result["max_lost_hits"] == 0
+    ref = result["reference_gate"]
+    assert ref["gate"] == relevance.default_gate().to_dict()
+    assert ref["abstain_nonempty_rate"] == 0.0 and ref["injected_hit_rate"] == 1.0
+    assert result["baseline"]["gate"] == Gate().to_dict() and result["baseline"]["abstain_nonempty_rate"] == 1.0
+    floors = {r["gate"]["vault_min_cosine"]: r for r in result["vault"]}
+    assert floors[0.49]["eligible"] and not SW.beats(floors[0.49], ref)
+    assert floors[0.61]["lost_hits"] == 1 and not floors[0.61]["eligible"]
+    # No gate loses nothing but raises false injection: not eligible against the live gate.
+    assert result["baseline"]["abstain_rise"] == 1.0 and not result["baseline"]["eligible"]
+    assert result["recommended"] is None and result["flags"] == ""
+    assert result["sets"]["receipt"]["recommended"] is None
+    assert "Recommended: keep the live gate" in SW.table(result)
+    # The receipt's recorded gate is the reference when present (here: no gate, the old result).
+    recorded = SW.sweep(_receipt(ROWS, gate=Gate().to_dict()), **NARROW)
+    assert recorded["recommended"]["gate"]["vault_min_cosine"] == 0.49
+
+
+# A: a floor at 0.57 drops the abstain row's injection that the serving gate lets through.
+SET_A = {
+    "a1": _rec([_item(0.70, match=[0]), _item(0.50)]),
+    "a2": _rec([_item(0.56), _item(0.55)], expected=0, abstain=True),
+}
+# B: the serving gate injects this gold at 0.565; a floor at 0.57 loses it.
+SET_B = {"b1": _rec([_item(0.565, match=[0])]), "b2": _rec([_item(0.80, match=[0])])}
+
+
+def test_sweep_needs_a_config_to_hold_on_every_receipt():
+    alone = SW.sweep(_receipt(SET_A), **NARROW)
+    winner = alone["recommended"]
+    assert winner["gate"]["vault_min_cosine"] == 0.57 and winner["abstain_nonempty_rate"] == 0.0
+    assert alone["sets"]["receipt"]["reference"]["abstain_nonempty_rate"] == 1.0
+    both = SW.sweep([("a", _receipt(SET_A)), ("b", _receipt(SET_B))], **NARROW)
+    assert both["rows"] == 4 and "receipt" not in both and set(both["sets"]) == {"a", "b"}
+    row = next(r for r in both["vault"] if r["gate"]["vault_min_cosine"] == 0.57)
+    assert row["sets"]["a"]["eligible"] and row["sets"]["a"]["lost_hits"] == 0
+    assert row["sets"]["b"]["lost_hits"] == 1 and not row["sets"]["b"]["eligible"] and not row["eligible"]
+    assert row["lost_hits"] == 1
+    # Pooled, the winner would still beat the live gate; it is out because it fails on b.
+    assert SW.beats(row, both["reference_gate"]) and both["recommended"] is None
+    # The lost row alone keeps it out even with the rate bound off, until a loss is allowed.
+    loose = SW.sweep([("a", _receipt(SET_A)), ("b", _receipt(SET_B))], max_loss=1.0, **NARROW)
+    assert loose["recommended"] is None
+    allowed = SW.sweep([("a", _receipt(SET_A)), ("b", _receipt(SET_B))], max_loss=1.0, max_lost_hits=1, **NARROW)
+    assert allowed["recommended"]["gate"]["vault_min_cosine"] == 0.57
+    per = allowed["sets"]
+    assert per["b"]["recommended"]["lost_hits"] == 1 and per["a"]["recommended"]["gained_hits"] == 0
+    assert per["b"]["reference"]["injected_hit_rate"] == 1.0 and per["b"]["recommended"]["injected_hit_rate"] == 0.5
+    text = SW.table(allowed)
+    assert "in 2 receipts" in text and "| b | recommended |" in text and "| a | reference |" in text
+    with pytest.raises(SW.SweepError, match="repeat"):
+        SW.sweep([("a", _receipt(SET_A)), ("a", _receipt(SET_B))])
+
+
+def test_cli_sweeps_several_named_receipts(tmp_path, capsys):
+    from quoth.cli import main as cli_main
+    a, b, out = tmp_path / "a.json", tmp_path / "b.json", tmp_path / "sweep.json"
+    a.write_text(json.dumps(_receipt(SET_A)))
+    b.write_text(json.dumps(_receipt(SET_B)))
+    assert cli_main(["eval", "sweep", f"first={a}", str(b), "--vault-gaps", "none", "--vault-rescues", "none",
+                     "--out", str(out)]) == 0
+    result = json.loads(out.read_text())
+    assert set(result["sets"]) == {"first", "b"} and result["recommended"] is None
+    assert "keep the live gate" in capsys.readouterr().out
+    assert cli_main(["eval", "sweep", str(a), "--reference", "none", "--format", "json"]) == 0
+    old = json.loads(capsys.readouterr().out)
+    assert old["reference"] == "none" and old["receipt"]["rows"] == 2 and old["recommended"] is not None
+    assert cli_main(["eval", "sweep", str(a), str(a)]) == 2  # the same name twice
+    assert "repeat" in capsys.readouterr().err
+
+
+def test_sweep_does_not_raise_false_injection_on_any_receipt():
+    """A gentler config that gains an answer on one receipt but injects on another's abstain
+    rows is not eligible."""
+    gain = {"g1": _rec([_item(0.52, match=[0])])}  # below the serving floor: a floor of 0.50 gains it
+    noisy = {"n1": _rec([_item(0.51)], expected=0, abstain=True), "n2": _rec([_item(0.90, match=[0])])}
+    result = SW.sweep([("gain", _receipt(gain)), ("noisy", _receipt(noisy))], vault_cosines=[0.50], **NARROW)
+    row = next(r for r in result["vault"] if r["gate"]["vault_min_cosine"] == 0.50)
+    assert row["sets"]["gain"]["gained_hits"] == 1 and row["sets"]["noisy"]["abstain_rise"] == 1.0
+    assert not row["sets"]["noisy"]["eligible"] and result["recommended"] is None
+
+
+def test_every_grid_keeps_the_reference_short_rule():
+    short = {k: D.GATE[k] for k in relevance.SHORT_FIELDS}
+    rows = {"r": _rec([{**_item(0.7, match=[0]), "rerank": 0.9}, {**_item(0.6), "rerank": 0.1}])}
+    rows["r"]["stores"]["claims"] = {"expected": 0, "items": [{"score": 0.6, "pool": True, "injected": True,
+                                                                 "rerank": 0.5}]}
+    grids = (SW.vault_grid(rows) + SW.rerank_grid(rows) + SW.claims_grid(rows) + SW.claims_rerank_grid(rows))
+    assert SW.rerank_grid(rows) and SW.claims_rerank_grid(rows)
+    assert all({k: getattr(g, k) for k in relevance.SHORT_FIELDS} == short for g in grids)
+    # Against a reference with its own rules: vault configs keep its claims part and short
+    # rule, claims configs its whole vault part.
+    ref = Gate(vault_min_cosine=0.5, vault_max_gap=0.1, claims_min_lexical=0.34, vault_short_terms=2,
+               vault_short_min_cosine=0.7)
+    for g in SW.rerank_grid(rows, keep=SW.keep_for_vault(ref)) + SW.vault_grid(rows, keep=SW.keep_for_vault(ref)):
+        assert (g.vault_short_terms, g.vault_short_min_cosine, g.claims_min_lexical) == (2, 0.7, 0.34)
+    for g in SW.claims_grid(rows, keep=SW.keep_for_claims(ref)) + SW.claims_rerank_grid(
+            rows, keep=SW.keep_for_claims(ref)):
+        assert (g.vault_min_cosine, g.vault_max_gap, g.vault_short_terms) == (0.5, 0.1, 2)
+    # The sweep passes the recorded gate through: no swept config drops the rule.
+    result = SW.sweep(_receipt(rows, gate=ref.to_dict()), **NARROW)
+    swept = result["vault"] + result["vault_rerank"] + result["claims"] + result["combined"]
+    assert swept and all(r["gate"]["vault_short_terms"] == 2 for r in swept)
+    assert all(r["gate"]["vault_min_cosine"] == 0.5 for r in result["claims"])
 
 
 def test_sweep_refuses_receipts_without_candidates():

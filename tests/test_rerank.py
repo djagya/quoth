@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+from quoth import recall_defaults as D
 from quoth import relevance, rerank, sidecar
 from quoth.evals import InProcessTarget, load_set, run_set
 from quoth.evals import sweep as SW
@@ -392,6 +393,9 @@ def test_sweep_recommends_a_rerank_config_and_names_the_fallback():
     rec = result["recommended"]
     assert rec["gate"]["vault_rerank_widen"] == 4 and rec["injected_hit_rate"] == 1.0
     assert "--vault-rerank-widen 4" in result["flags"] and result["fallback_flags"] is not None
+    # Rerank configs keep the serving short-query rule: the pick does not turn it off.
+    assert all(r["gate"]["vault_short_terms"] == D.GATE["vault_short_terms"] for r in result["vault_rerank"])
+    assert "--vault-short" not in result["flags"]
     text = SW.table(result)
     assert "Vault rerank floor only" in text and "Turns without rerank scores keep the cosine gate" in text
     # A receipt without rerank scores sweeps exactly as before.
