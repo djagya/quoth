@@ -1,7 +1,7 @@
 ---
 name: memory-review
 description: "Use when the owner asks to review memory, or answers a memory-review nudge: presort the Quoth queue yourself, then walk the owner through it topic by topic in short numbered rounds and apply exactly what they answer."
-version: 3.4.0
+version: 3.5.0
 author: quoth
 ---
 
@@ -112,11 +112,14 @@ round.
 
 ## 5. After the review
 
-When anything was accepted or edited, or an undo returned `core_stale: true`,
-republish the core block with the quoth install's command:
+The sidecar republishes the core block itself after every decision that
+changes accepted memory (accept, edit, forget, an apply that accepts, an
+undo of accepts): the result carries `core` (`published`, `claims`). Tell
+the owner that new sessions read the updated core. Only when a result
+reports `core.error`, republish with the quoth install's command:
 `quoth ledger compile-core --publish "$QUOTH_HOME/core"`
-(the ledger defaults to `$QUOTH_HOME/ledger.db`). New sessions read the new
-core; say so.
+(the ledger defaults to `$QUOTH_HOME/ledger.db`). Without `core` in the
+result, nothing is published and the core is compiled live.
 
 `/quoth queue` in chat shows the same digest read-only; `/quoth queue
 <topic>` lists one group; `/quoth item N` shows one memory in detail.
