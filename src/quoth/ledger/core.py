@@ -249,7 +249,8 @@ def propose(conn: sqlite3.Connection, *, text: str, kind: str, origin: str, prop
             conn.execute("UPDATE claims SET review_status = 'expired', superseded_at = ?,"
                          " superseded_by = ? WHERE id = ?", (now, claim_id, old))
             _event(conn, old, "expired_latest_wins", proposer, now, by=claim_id)
-            _restore_duplicates_of(conn, old, proposer, now, None)  # copies dropped in its favour return
+            # Not the owner's decision: copies dropped in its favour return to review.
+            _restore_duplicates_of(conn, old, proposer, now, None)
         if replaced_pending and decision == "add":
             decision = "replace_pending"
         closest = sorted(
@@ -311,9 +312,11 @@ def reject(conn, claim_id: int, actor: str = "owner", note: str | None = None, n
            batch: str | None = None, duplicate_of: int | None = None) -> dict:
     """Reject a pending claim. `duplicate_of` records that it was dropped as a copy of that claim.
 
-    Copies earlier rejected as duplicates of this claim return to review in the same
-    transaction (`restored_duplicates`): with their original dropped, nothing would keep the fact.
-    Expiry (latest-wins, age) restores them the same way.
+    The owner's drop takes its confirmed copies with it (`family`, see `duplicate_family`), in
+    the same transaction and under the same batch: copies already rejected stay rejected, and
+    copies that are pending only because the system restored them are rejected again
+    (`family_of`). Nothing else changes: a claim with only a pending `duplicate` suggestion,
+    a copy the owner decided again, and accepted claims are left alone.
     """
     now = now or _now()
     with _tx(conn):
@@ -322,11 +325,97 @@ def reject(conn, claim_id: int, actor: str = "owner", note: str | None = None, n
                      " WHERE id = ?", (now, note, claim_id))
         _event(conn, claim_id, "rejected", actor, now, **_batch(batch),
                **({"duplicate_of": duplicate_of} if duplicate_of is not None else {}))
-        restored = _restore_duplicates_of(conn, claim_id, actor, now, batch)
-    return {**get(conn, claim_id), "restored_duplicates": restored}
+        family = _drop_family(conn, claim_id, actor, now, note, batch)
+    return {**get(conn, claim_id), "family": family}
+
+
+# Events that record no decision: presort suggestions and re-proposals of the same text.
+_NO_DECISION = ("suggested", "re_proposed")
+
+
+def _last_decision(conn, claim_id) -> tuple[str | None, dict]:
+    row = conn.execute(f"SELECT action, detail FROM ledger_events WHERE claim_id = ?"
+                       f" AND action NOT IN {_NO_DECISION} ORDER BY id DESC LIMIT 1", (claim_id,)).fetchone()
+    if row is None:
+        return None, {}
+    try:
+        detail = json.loads(row[1]) if row[1] else {}
+    except ValueError:
+        detail = {}
+    return row[0], detail if isinstance(detail, dict) else {}
+
+
+def duplicate_family(conn, root: int) -> dict:
+    """The claims confirmed as copies of `root`, transitively: what dropping `root` drops with it.
+
+    A claim C belongs when its latest decision is a rejection as a duplicate of a member
+    (`already_rejected`), or a system restore after that member was dropped (`restored`, with
+    `target_dropped`) and the owner has decided nothing about C since (`to_reject`, as
+    (id, original target) pairs). The walk starts at `root`, keeps a visited set (so a cycle
+    ends) and skips superseded claims. Pending `duplicate` suggestions are not confirmations;
+    accepted claims, and copies the owner accepted, edited, undid or dropped for another
+    reason, are never members. Read-only.
+    """
+    seen, frontier = {root}, [root]
+    already, to_reject = [], []
+    while frontier:
+        target = frontier.pop(0)
+        candidates = conn.execute(
+            "SELECT DISTINCT claim_id FROM ledger_events WHERE (action = 'rejected'"
+            " AND json_extract(detail, '$.duplicate_of') = ?) OR (action = 'restored'"
+            " AND json_extract(detail, '$.target_dropped') = ?) ORDER BY claim_id",
+            (target, target)).fetchall()
+        for (cid,) in candidates:
+            if cid in seen:
+                continue
+            row = conn.execute("SELECT review_status, superseded_by FROM claims WHERE id = ?",
+                               (cid,)).fetchone()
+            if row is None or row["superseded_by"] is not None:
+                continue
+            action, detail = _last_decision(conn, cid)
+            if row["review_status"] == "rejected" and action == "rejected" \
+                    and detail.get("duplicate_of") == target:
+                already.append(cid)
+            elif row["review_status"] == "pending" and action == "restored" \
+                    and detail.get("target_dropped") == target:
+                to_reject.append((cid, target))
+            else:
+                continue  # the owner decided this claim again, or it is not a copy of `target`
+            seen.add(cid)
+            frontier.append(cid)
+    return {"root": root, "already_rejected": sorted(already), "to_reject": sorted(to_reject)}
+
+
+def _drop_family(conn, root: int, actor, now, note, batch) -> dict:
+    family = duplicate_family(conn, root)
+    rejected_now = []
+    for cid, target in family["to_reject"]:
+        why = f"duplicate of #{target}, dropped with #{root}"
+        conn.execute("UPDATE claims SET review_status = 'rejected', reviewed_at = ?, review_note = ?"
+                     " WHERE id = ?", (now, why + (f"; {note}" if note else ""), cid))
+        _event(conn, cid, "rejected", actor, now, duplicate_of=target, family_of=root, **_batch(batch))
+        rejected_now.append(cid)
+    # Read back inside the transaction: no confirmed copy of the dropped claim is left pending.
+    if duplicate_family(conn, root)["to_reject"]:
+        raise RuntimeError("duplicate family left pending")
+    return {"root": root, "ids": sorted(rejected_now + family["already_rejected"]),
+            "rejected_now": rejected_now, "already_rejected": family["already_rejected"]}
+
+
+def family_rejects(conn, claim_ids: Iterable[int]) -> set[int]:
+    """Ids that rejecting `claim_ids` would reject as well (their families' restored copies)."""
+    ids = set(claim_ids)
+    return {cid for root in ids for cid, _ in duplicate_family(conn, root)["to_reject"]} - ids
 
 
 def _restore_duplicates_of(conn, target: int, actor, now, batch) -> list[int]:
+    """Return to review the copies rejected as duplicates of `target`, which just ended without
+    the owner's decision (expired by age, or replaced by a newer proposal for its slot).
+
+    The owner confirmed each copy as the same fact as `target`, never that the fact is wrong:
+    with `target` gone and nothing else holding it, the copies come back (`restored`,
+    `target_dropped`). An owner's reject never calls this: dropping a claim drops its copies.
+    """
     restored = []
     for (cid,) in conn.execute("SELECT DISTINCT claim_id FROM ledger_events WHERE action = 'rejected'"
                                " AND json_extract(detail, '$.duplicate_of') = ? ORDER BY claim_id",
@@ -428,7 +517,7 @@ def expire_pending(conn, max_age_days: float = 30, actor: str = "expiry", now: s
         for claim_id in ids:
             conn.execute("UPDATE claims SET review_status = 'expired' WHERE id = ?", (claim_id,))
             _event(conn, claim_id, "expired_age", actor, now, max_age_days=max_age_days)
-            _restore_duplicates_of(conn, claim_id, actor, now, None)
+            _restore_duplicates_of(conn, claim_id, actor, now, None)  # aged out: copies return
     return ids
 
 
@@ -546,8 +635,7 @@ def apply_suggestions(conn, claim_ids: Iterable[int], *, actor: str = "owner", n
                              duplicate_of=tip["duplicate_of"] if action == "duplicate" else None)
             results.append({"id": claim_id, "applied": action, "result_id": out["id"],
                             "review_status": out["review_status"], "text": _short(out["text"])}
-                           | ({"restored_duplicates": out["restored_duplicates"]}
-                              if out.get("restored_duplicates") else {}))
+                           | ({"family": out["family"]} if "family" in out else {}))
         except LedgerRejected as exc:
             results.append({"id": claim_id, "error": exc.code})
     return results
