@@ -28,6 +28,7 @@ can read memory and propose claims, so share that group only with the gateway.
 | `compose/quoth-control.yaml` | the WebUI memory views: one read-only container in the WebUI's network namespace, plus the WebUI extension mount |
 | `cron/quoth-review-nudge.sh` | the weekly nudge wrapper (`quoth ledger nudge`) for a script-only Hermes cron |
 | `hermes-mcp-snippet.yaml` | the read-only MCP entry |
+| `diagnostics/quoth-proposal-audit.py` | counts-only audit of where rejected proposals come from (stdlib, opens `ledger.db` with `mode=ro`; [LEDGER.md](../docs/LEDGER.md#proposal-audit)) |
 
 ## Install a release
 

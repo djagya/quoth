@@ -9,7 +9,7 @@ kind, suggestion action, sanitised proposer names), bins and counts.
     python3 quoth-proposal-audit.py [LEDGER] [--days 30] [--now 2026-01-31T00:00:00Z]
 
 LEDGER defaults to $QUOTH_HOME/ledger.db, else ~/.local/share/quoth/ledger.db. Standard
-library only, so the copy in a release (deploy/diagnostics/) runs with any python3 >= 3.11.
+library only, so the copy in a release (deploy/diagnostics/) runs with any python3 >= 3.9.
 
 One proposal is one claim the proposer wrote (claims an owner's edit created are decisions,
 not proposals). Its outcome, from the ledger as it is now:
@@ -37,7 +37,7 @@ import sqlite3
 import sys
 import unicodedata
 from collections import Counter, defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCHEMA = "quoth-proposal-audit/1"
@@ -60,6 +60,20 @@ TIME_BINS = ((HOUR, "<1h"), (24 * HOUR, "1h-1d"), (72 * HOUR, "1-3d"), (168 * HO
              (336 * HOUR, "7-14d"), (720 * HOUR, "14-30d"))
 BATCH_BINS = ((1, "1"), (9, "2-9"), (49, "10-49"))
 NEAR_DEFAULT = 0.8
+# Coarse shape flags, counted per outcome (the text itself is never printed). Heuristics with
+# English cue words, since the assistant's built-in memory notes are mostly English.
+SHAPES = {
+    "url": re.compile(r"https?://", re.I),
+    "path": re.compile(r"(^|[\s(`'\"])(~|\.{0,2})/[\w.-]+/"),
+    "date_or_time": re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}\b"),
+    "code_or_command": re.compile(r"`|\$\(|==|\{\}|--[a-z]"),
+    "multi_line": re.compile(r"\n"),
+    "says_user_or_owner": re.compile(r"\b(user|owner)('s)?\b", re.I),
+    "first_person": re.compile(r"\b(I|I'm|I've|I'll|my|me)\b"),
+    "instruction": re.compile(r"^\s*(always|never|remember|note|todo|use|don't|do not|must|should)\b",
+                              re.I),
+}
+SENTENCE_END = re.compile(r"[.!?](\s|$)")
 _WORD = re.compile(r"\w+", re.UNICODE)
 
 
@@ -82,7 +96,7 @@ def parse_ts(ts: str | None) -> datetime | None:
         moment = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
 def label(value: str | None) -> str:
@@ -253,8 +267,10 @@ def facts(data: dict) -> list[dict]:
                 "decision_batch_size": batch_bin(batch_sizes[batch]) if batch else "no_batch",
             } if owner_decided else {},
             "reject_path": reject_path,
+            "shapes": [name for name, rx in SHAPES.items() if rx.search(c["text"])]
+            + (["many_sentences"] if len(SENTENCE_END.findall(c["text"])) >= 3 else []),
         })
-    out.sort(key=lambda f: (f["recorded"] or datetime.min.replace(tzinfo=UTC), f["id"]))
+    out.sort(key=lambda f: (f["recorded"] or datetime.min.replace(tzinfo=timezone.utc), f["id"]))
     return out
 
 
@@ -411,6 +427,16 @@ def repeats(all_rows: list[dict], in_window, threshold: float) -> dict:
     }
 
 
+def shape_counts(rows: list[dict]) -> dict:
+    """Outcomes per shape flag (a proposal may carry several); `none` = no flag."""
+    out = {}
+    for name in (*SHAPES, "many_sentences", "none"):
+        members = [r for r in rows if name in r["shapes"] or (name == "none" and not r["shapes"])]
+        if members:
+            out[name] = _counts(members)
+    return out
+
+
 def section(all_rows: list[dict], in_window, threshold: float) -> dict:
     rows = [r for r in all_rows if in_window(r)]
     decided = [r for r in rows if r["owner_decided"]]
@@ -425,6 +451,7 @@ def section(all_rows: list[dict], in_window, threshold: float) -> dict:
         "time_to_decision": _breakdown(decided, "time_to_decision", "decided_dims"),
         "decision_batch_size": _breakdown(decided, "decision_batch_size", "decided_dims"),
         "reject_path": dict(sorted(Counter(r["reject_path"] for r in rejected).items())),
+        "text_shape": shape_counts(rows),
         "presort": presort(rows),
         "reproposals": repeats(all_rows, in_window, threshold),
     }
@@ -444,7 +471,7 @@ def events_summary(events: list[dict], since: datetime) -> dict:
 
 def audit(path: Path, *, days: float = 30, now: datetime | None = None,
           near_threshold: float = NEAR_DEFAULT) -> dict:
-    now = now or datetime.now(UTC)
+    now = now or datetime.now(timezone.utc)
     since = now - timedelta(days=days)
     conn, mode = connect(path)
     try:
@@ -466,7 +493,7 @@ def audit(path: Path, *, days: float = 30, now: datetime | None = None,
     window = f"last_{days:g}d"
     return {
         "schema": SCHEMA,
-        "now": now.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "now": now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "window_days": days,
         "ledger": {"opened": mode, "migrations": data["migrations"],
                    "claims": len(data["claims"]), "proposals": len(rows),

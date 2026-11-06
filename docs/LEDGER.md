@@ -172,6 +172,30 @@ older than 14 days (`--max-pending`, `--max-age-days`). It also reports pending 
 7-day counts of proposed, re-proposed, accepted, auto-accepted, rejected, superseded,
 expired, forgotten and undone claims. The sidecar's `/v1/health` uses the same rule.
 
+## Proposal audit
+
+`deploy/diagnostics/quoth-proposal-audit.py` measures where rejected proposals come from. It
+uses only the standard library (python3 ≥ 3.9), opens the ledger with `mode=ro`, and prints
+one JSON document with counts only: no claim text, quotes, notes, locators or ids. Proposer
+names that are not plain labels print as `other`.
+
+```bash
+python3 quoth-proposal-audit.py "$QUOTH_HOME/ledger.db" [--days 30] [--now ISO] [--near 0.8]
+```
+
+For all time and for the last `--days` (by proposal time) it reports each proposal's outcome
+(`accepted`, `accepted_edited`, `rejected`, `duplicate_rejected`, `superseded`, `expired`,
+`pending`) and `rejection_share` (rejections / owner decisions, auto-accepts excluded),
+broken down by origin, proposer, kind at proposal and at decision, `quote_verified`, presort
+suggestion and who made it, mirror action (`memory:add`, `user:replace`, …), text length
+(the `600 (cap)` bin is text the mirror truncated) and coarse text-shape flags (path, URL,
+code, first person, …). It also gives time to decision, decision batch size, how rejections
+were made (`applied_suggestion`, `direct`, `family_of_dropped_claim`), presort precision
+and recall against the owner's final decision, proposals of a text or `subject_key` already
+rejected, and how many rejected claims repeat an earlier rejected text (exact or with word
+overlap ≥ `--near`). `health`'s 7-day counts are events, so a claim rejected, undone and
+rejected again counts twice there; this audit counts claims.
+
 ## Commands
 
 `quoth ledger [--ledger PATH] ACTION`; the ledger defaults to `$QUOTH_HOME/ledger.db`.

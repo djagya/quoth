@@ -123,6 +123,23 @@ def test_outcomes_and_rejection_share(ledger_path):
     assert full["by"]["suggested_by"]["assistant:cron"]["rejected"] == 1
     assert full["origin_x_suggestion"]["imported"]["reject"]["rejected"] == 1
     assert full["by"]["text_length"]["<50"]["total"] == 14
+    assert full["text_shape"]["says_user_or_owner"]["total"] == 10
+    assert full["text_shape"]["none"]["total"] == 4
+
+
+def test_text_shapes_and_length_cap(tmp_path):
+    path = tmp_path / "ledger.db"
+    conn = core.open_ledger(path)
+    at = "2026-10-30T00:00:00.000Z"
+    _mirror(conn, "Deployed via `make ship` to ~/srv/app/ on 2026-10-29, see https://x.invalid/a", at)
+    _mirror(conn, "I fixed it. Then I checked. Then I left.\nDone", at)
+    _mirror(conn, "y" * core.MAX_CLAIM_CHARS, at)
+    conn.close()
+    out = _run(path)["all_time"]
+    shapes = {name: v["total"] for name, v in out["text_shape"].items()}
+    assert shapes == {"url": 1, "path": 1, "date_or_time": 1, "code_or_command": 1, "multi_line": 1,
+                      "first_person": 1, "many_sentences": 1, "none": 1}
+    assert out["by"]["text_length"]["600 (cap)"]["total"] == 1
 
 
 def test_decision_paths_timing_and_batches(ledger_path):

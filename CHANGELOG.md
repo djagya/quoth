@@ -28,6 +28,13 @@ the `v*` tags.
 - The public fixture gains `eval/public/claims.jsonl` (6 synthetic claims-gold rows, run by
   the `public` suite as `claims`), so CI covers resolution and judged precision.
 
+### Diagnostics
+
+- **Proposal audit.** `deploy/diagnostics/quoth-proposal-audit.py` (stdlib, read-only,
+  counts only) reports where rejected proposals come from: outcomes by origin, proposer, kind,
+  presort suggestion, mirror action, text length and shape, plus presort precision, time to
+  decision, re-proposals after a rejection and repeated rejected texts. Not in the wheel.
+
 ## 0.18.1 — a dropped memory takes its copies; the sidecar republishes the core
 
 No index-contract file changed since 0.18.0: 0.17 snapshots keep serving.
