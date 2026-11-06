@@ -89,6 +89,28 @@ def _rr(rank: int | None) -> float:
     return 1.0 / rank if rank is not None and rank <= MRR_CUTOFF else 0.0
 
 
+# Stores whose gold a set gives for every answerable row: an injected item there that is not
+# gold is known wrong. Other stores (claims, episode lanes) are judged on a row only when it
+# says so (`claims_judged`); elsewhere an injected item that is not gold is unknown, not wrong.
+JUDGED_STORES = ("vault",)
+
+
+def _judged_precision(rows: list[dict]) -> float | None:
+    """Share of injected items known right among injected items known right or wrong, per row,
+    averaged. Unlike `injected_precision`, an unlabelled claim or episode does not count as
+    wrong, so a gate is not rewarded for injecting no claims on a set without claims gold."""
+    shares = []
+    for o in rows:
+        right = known = 0
+        for name, st in o["stores"].items():
+            right += st["injected_matched"]
+            judged = name in JUDGED_STORES or (name == "claims" and o.get("claims_judged"))
+            known += st["injected"] if judged else st["injected_matched"]
+        if known:
+            shares.append(right / known)
+    return _mean(shares)
+
+
 def block(obs: list[dict]) -> dict:
     """Aggregate metrics of a group of observations."""
     answerable = [o for o in obs if o["answerable"]]
@@ -101,6 +123,7 @@ def block(obs: list[dict]) -> dict:
         "injected_mrr": _mean(_rr(o["block_rank"]) for o in answerable),
         "injected_precision": _mean(
             sum(s["injected_matched"] for s in o["stores"].values()) / o["block"] for o in with_block),
+        "judged_precision": _judged_precision(with_block),
         "empty_rate": _mean(o["block"] == 0 for o in obs),
         "abstain_nonempty_rate": _mean(o["block"] > 0 for o in abstain),
         "stale_leak": sum(any(s["stale_injected"] for s in o["stores"].values()) for o in stale),

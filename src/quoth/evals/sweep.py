@@ -247,7 +247,8 @@ def _summary(obs: list[dict], times: list, gate: relevance.Gate, budget_ms: floa
            "claims_injected_hit_rate": claims.get("injected_hit_rate"),
            "claims_judged_precision": claims.get("judged_precision"),
            "injected_hit_rate": b["injected_hit_rate"], "injected_mrr": b["injected_mrr"],
-           "injected_precision": b["injected_precision"], "abstain_nonempty_rate": b["abstain_nonempty_rate"],
+           "injected_precision": b["injected_precision"], "judged_precision": b["judged_precision"],
+           "abstain_nonempty_rate": b["abstain_nonempty_rate"],
            "empty_rate": b["empty_rate"], "stale_leak": b["stale_leak"],
            "items_mean": M._mean(o["block"] for o in obs),
            "vault_items_mean": M._mean(o["stores"]["vault"]["injected"] for o in obs),
@@ -266,7 +267,8 @@ def objective(row: dict) -> tuple:
     """Higher is better: precision + abstain correctness, then hits, then the gentler and
     simpler config (more items kept, fewer thresholds set)."""
     abstain = row["abstain_nonempty_rate"]
-    return (round((row["injected_precision"] or 0.0) + (0.0 if abstain is None else 1.0 - abstain), 4),
+    precision = row.get("judged_precision", row["injected_precision"])
+    return (round((precision or 0.0) + (0.0 if abstain is None else 1.0 - abstain), 4),
             row["injected_hit_rate"] or 0.0, row["items_mean"] or 0.0,
             -sum(v is not None for v in (row["gate"] or {}).values()))
 
@@ -430,7 +432,7 @@ def _against(row: dict, hits: dict, ref: dict, ref_hits: dict, max_loss: float,
             "over_budget": over, "eligible": eligible}
 
 
-PER_SET = ("injected_hit_rate", "injected_precision", "abstain_nonempty_rate", "items_mean")
+PER_SET = ("injected_hit_rate", "injected_precision", "judged_precision", "abstain_nonempty_rate", "items_mean")
 
 
 def sweep(receipts, *, reference: str = DEFAULT_REFERENCE, max_loss: float = DEFAULT_MAX_LOSS,
@@ -528,7 +530,7 @@ def sweep(receipts, *, reference: str = DEFAULT_REFERENCE, max_loss: float = DEF
         fallback = " ".join(relevance.Gate(**_vault_part(cosine_best["gate"])).flags()) if cosine_best else ""
     out = {"schema": SCHEMA, "reference": reference, "reference_gate": ref, "rows": len(pooled_rows),
            "max_loss": max_loss, "max_lost_hits": max_lost_hits, "constraints": list(CONSTRAINTS),
-           "objective": "injected_precision + (1 - abstain_nonempty_rate)",
+           "objective": "judged_precision + (1 - abstain_nonempty_rate)",
            "vault_scored_share": M._mean(vault_scored),
            "vault_reranked_share": M._mean("rerank" in it for it in served) if _scored(pooled_rows, "vault") else None,
            "baseline": base, "vault": vault, "vault_rerank": vault_rerank, "claims": claims, "combined": combined,
