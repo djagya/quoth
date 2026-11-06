@@ -1017,7 +1017,10 @@ class Quoth:
         stamp_seen = _opt_str(body, "bucket_stamp")
         text, kind = _opt_str(body, "text"), _opt_str(body, "kind")
         note_extra, forget_reason = _opt_str(body, "note"), _opt_str(body, "reason")
-        if bucket is not None:
+        # Copies of dropped originals also clear by page (`ids`, each still such a copy): with no
+        # suggestion behind them, a bucket over the cap has no other way through.
+        paged = bucket == ledger.DROPPED_COPIES and bool(ids)
+        if bucket is not None and not paged:
             # A whole junk bucket, exactly as the owner saw it in the digest (its stamp).
             if ids:
                 raise SidecarError("ids_or_bucket")
@@ -1049,7 +1052,7 @@ class Quoth:
             used = ledger.batch_used(self.conn, locator)
             if used["undone"]:
                 raise SidecarError("approval_spent")  # what was undone is not re-applied on the same words
-            if bucket is not None:
+            if bucket is not None and not paged:
                 ids, stamp = ledger.bucket_state(self.conn, bucket)
                 if stamp != stamp_seen:
                     raise SidecarError("bucket_changed")
