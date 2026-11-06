@@ -119,7 +119,7 @@ def test_gate_suite_checks_the_fixture_and_skips_tune_sets(tmp_path):
     public = REPO / 'eval' / 'suites' / 'public.json'
     with pytest.raises(nightly.SuiteGateError, match='suite_invalid'):
         nightly.gate_suite(public)
-    assert [e.id for e in nightly.gate_suite(public, 'eval/public')[0].entries] == ['fixture', 'no-memory']
+    assert [e.id for e in nightly.gate_suite(public, 'eval/public')[0].entries] == ['fixture', 'claims', 'no-memory']
     # A set written for other stores is refused even when the suite's fixture matches.
     other = suite_file(tmp_path, [{'id': 'f', 'path': str(PUBLIC / 'set.jsonl'), 'role': 'smoke'}], name='o.json')
     with pytest.raises(nightly.SuiteGateError):

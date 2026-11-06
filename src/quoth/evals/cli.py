@@ -138,6 +138,10 @@ def _cmd_run(a) -> int:
         except (OSError, ValueError) as exc:
             _err(f"invalid oracle file: {type(exc).__name__}")
             return 2
+    from .claims_gold import has_anchors
+    if a.socket and not a.ledger and has_anchors(evalset.rows):
+        print("warning: the set has claims gold; without --ledger it stays unresolved (no_ledger) and"
+              " claims-only rows are not scored", file=sys.stderr)
     trace = [] if a.trace_out else None
     try:
         receipt, detail = run_set(evalset, target, k_candidates=a.k_candidates,

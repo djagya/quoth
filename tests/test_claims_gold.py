@@ -351,3 +351,25 @@ def test_label_claims_cli_prints_counts_only(tmp_path, ledger, capsys):
     assert cli_main(["eval", "label-claims", str(set_path), "--ledger", str(tmp_path / "nope.db"),
                      "--out", str(tmp_path / "x.jsonl")]) == 2
     assert cli_main(["eval", "validate", str(out)]) == 0
+
+
+def test_a_socket_run_resolves_against_its_ledger_read_only(ledger, tmp_path):
+    import sqlite3
+    from types import SimpleNamespace
+    from quoth.evals.run import RunError, claims_resolver
+    path, ids = ledger
+    before = path.read_bytes()
+    r = claims_resolver(SimpleNamespace(ledger=str(path)))
+    try:
+        assert r.resolve({"text": "Likes green tea."})["ids"] == [ids["tea_edit"]]
+        with pytest.raises(sqlite3.OperationalError):
+            r.conn.execute("DELETE FROM claims")  # opened read-only
+    finally:
+        r.close()
+    assert path.read_bytes() == before
+    assert claims_resolver(SimpleNamespace(ledger=None)).conn is None
+    with pytest.raises(RunError):
+        claims_resolver(SimpleNamespace(ledger=str(tmp_path / "missing.db")))
+    (tmp_path / "junk.db").write_text("not a ledger")
+    with pytest.raises(RunError):
+        claims_resolver(SimpleNamespace(ledger=str(tmp_path / "junk.db")))

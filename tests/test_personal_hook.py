@@ -43,7 +43,7 @@ def test_the_hook_scores_a_suite_keeps_a_baseline_and_compares_against_it(tmp_pa
     assert first.returncode == 0, first.stdout[-3000:]
     assert "1 passed" in first.stdout
     line = next(json.loads(x) for x in first.stdout.splitlines() if x.startswith('{"sets"'))
-    assert set(line["sets"]) == {"fixture", "no-memory"}
+    assert set(line["sets"]) == {"fixture", "claims", "no-memory"}
     assert all(s["status"] == "ok" and s["scored"] > 0 for s in line["sets"].values())
     assert json.loads((tmp_path / "baseline" / "suite.json").read_text())["suite"]["name"] == "public"
     second = hook(**env, QUOTH_PERSONAL_BASELINE=str(tmp_path / "baseline"))
