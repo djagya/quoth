@@ -1,7 +1,7 @@
 ---
 name: memory-review
 description: "Use when the owner asks to review memory, or answers a memory-review nudge: presort the Quoth queue yourself, then walk the owner through it topic by topic in short numbered rounds and apply exactly what they answer."
-version: 3.6.0
+version: 3.7.0
 author: quoth
 ---
 
@@ -32,18 +32,30 @@ carries their exact words.
      one-off, not about them), `duplicate` (+ `duplicate_of` = the claim that
      stays), `covered` (their notes already say it: + `evidence_locator` from
      `vault`, only when the excerpt really says the same), `stale` (no longer
-     true), `keep` (you truly cannot judge);
+     true). Do not use `keep`: when you cannot judge, `reject` with
+     `note: "unsure"` (the owner sees it in the clean-up and can say "show");
    - `topic`: a short label, at most 40 chars ("Food & health", "Work",
      "Family"). Use few topics, about 5 to 12, so each holds a round or two;
    - `kind` from the enum, always;
-   - `text`: a clean rewrite (third person, one fact, under ~200 chars) when
-     the claim is wordy. For a duplicate cluster, put the merged wording on
+   - `text`: the exact wording to remember (third person, one fact, under
+     ~200 chars), on every `accept`, so the owner can say "ok" instead of
+     rewriting it. For a duplicate cluster, put the merged wording on
      the claim that stays (its `accept` suggestion) and point the others at it.
      A duplicate is only applied when the claim it points at stays (accepted,
      or suggested `accept`); never point two copies at each other;
    - `note`: a few words, only when the reason is not obvious.
+   **The bar for `accept`** (owners rejected almost everything else):
+   - only facts about the owner that stay true for months: who they are,
+     their people, preferences and tastes, consent, corrections;
+   - never setup or environment notes (paths, configs, hosts, tools, how
+     things are wired) or project status (what a task or project is doing
+     now): those belong in the notes or go stale. Suggest `covered`,
+     `stale` or `reject`;
+   - never your own working notes, instructions to yourself, or text that
+     is about the assistant rather than the owner.
 3. Re-suggesting replaces the earlier suggestion; the topic is kept when you
-   omit it. Prefer a clear `accept` or `reject` over `keep`.
+   omit it. When an operator asks for a re-presort, re-suggest every pending
+   claim under these rules, including ones already suggested.
 4. Done when `action=digest` shows `plan.unsorted` = 0.
 
 ## 2. Open the review

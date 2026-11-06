@@ -37,6 +37,13 @@ the `v*` tags.
 
 ### Review
 
+- **Stricter presort (memory-review skill 3.7.0).** A ledger audit showed the owner kept almost
+  none of what presort marked `accept` without rewording it, and none of the setup/environment
+  or project-status notes or the `keep` items. Presort now suggests `accept` only for durable
+  facts about the owner (identity, people, preferences, consent, corrections), always with the
+  final wording in `text`; setup notes, project status and the assistant's own notes go to
+  `covered`, `stale` or `reject`; `keep` is retired (unsure → `reject` with a note). An
+  operator-requested re-presort re-suggests every pending claim.
 - **Copies of memories you already dropped clear in one step.** Releases before 0.18.1
   restored an original's confirmed copies to pending when the owner dropped the original.
   Those copies now form a junk bucket, `dropped_copies`: pending, latest decision `restored`
