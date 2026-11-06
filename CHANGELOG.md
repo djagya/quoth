@@ -5,6 +5,10 @@ the `v*` tags.
 
 ## Unreleased
 
+## 0.18.1 — a dropped memory takes its copies; the sidecar republishes the core
+
+No index-contract file changed since 0.18.0: 0.17 snapshots keep serving.
+
 ### Review
 
 - **Dropping a memory drops its confirmed duplicates.** An owner's reject (`reject`, or
