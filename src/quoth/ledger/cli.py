@@ -102,6 +102,10 @@ def main(argv=None) -> int:
     ph = sub.add_parser("health", help="queue size/age and churn; exit 1 when red")
     ph.add_argument("--max-pending", type=int, default=40)
     ph.add_argument("--max-age-days", type=float, default=14)
+    ph.add_argument("--core-dir", type=Path, default=None,
+                    help="published core directory: red when its core.json no longer matches the ledger")
+    ph.add_argument("--core-budget", type=int, default=None,
+                    help="budget the core is served at (default: the published manifest's)")
     ps = sub.add_parser("seed", help="import JSONL {text, kind?, reason?} as pending imported claims")
     ps.add_argument("--file", required=True, type=Path)
     sub.add_parser("nudge", help="print the weekly review reminder, or nothing when the queue is empty"
@@ -142,7 +146,8 @@ def main(argv=None) -> int:
             else:
                 _print({"expired": core.expire_pending(conn, a.days)})
         elif a.cmd == "health":
-            result = core.health(conn, max_pending=a.max_pending, max_pending_age_days=a.max_age_days)
+            result = core.health(conn, max_pending=a.max_pending, max_pending_age_days=a.max_age_days,
+                                 core_dir=a.core_dir, core_budget=a.core_budget)
             _print(result)
             return 0 if result["status"] == "green" else 1
         elif a.cmd == "seed":

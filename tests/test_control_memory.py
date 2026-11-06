@@ -194,7 +194,7 @@ def test_queue_grouped_by_presort_with_counts(control):
     # The digest plan and topics, as the assistant walks them in chat; read-only, no stamps leak.
     assert out["plan"] == {"cleanup": 1, "to_read": 2, "unsorted": 1, "round_size": 10, "rounds": 1}
     assert [t["topic"] for t in out["topics"]] == ["Other"] and out["topics"][0]["to_read"] == 2
-    assert out["buckets"] == {"duplicate": 1, "covered": 0, "stale": 0, "reject": 0}
+    assert out["buckets"] == {"duplicate": 1, "covered": 0, "stale": 0, "reject": 0, "dropped_copies": 0}
     # Positions follow digest numbering: accept, keep, none first, then the clean-up buckets.
     position = {c["id"]: c["position"] for g in out["groups"].values() for c in g}
     assert position == {ids["tea"]: 1, ids["imported"]: 2, ids["dup"]: 3}
