@@ -53,7 +53,7 @@ from .ledger import core as ledger
 from .ledger.authored import (StateDbVerifier, approval, find_authored, is_assent, is_undo,
                               previous_authored)
 from .claim_index import ClaimIndex
-from .ledger.compile import compile_core, publish_core, published_core
+from .ledger.compile import compile_core, core_freshness, publish_core, published_core
 from . import recall_defaults as D
 from . import relevance
 
@@ -318,6 +318,22 @@ class Quoth:
             out = {"error": "publish_failed", "reason": type(exc).__name__}
         self.last_core_publish = {"at": ledger._now(), **out}
         return out
+
+    def ensure_core_published(self) -> dict | None:
+        """At startup: publish the core when the published one is missing or stale.
+
+        `/v1/core` serves the published file once one exists, so a core left behind by a change
+        outside a review (an operator's CLI accept, an older release) would otherwise be served
+        until the next review. None without `core_dir`, or when the published core is current.
+        """
+        if self.core_dir is None:
+            return None
+        with self.lock:
+            fresh = core_freshness(self.conn, self.core_dir, self.core_budget)
+        if fresh["status"] == "green":
+            return None
+        log.info("core %s at startup: publishing", fresh["reason"])
+        return self._republish_core()
 
     def prefetch(self, body: dict) -> dict:
         """Accepted claims and vault evidence for one turn, judged before the cut.
@@ -961,9 +977,15 @@ class Quoth:
             result = ledger.propose(
                 self.conn, origin=origin, reason=reason, evidence_quote=quote or None,
                 evidence_locator=locator, verifier=verifier, **fields)
-        return {"decision": result["decision"], "auto_accepted": result["auto_accepted"],
-                "claim": _claim_view(result["claim"]),
-                "closest": result["closest"]}
+        out = {"decision": result["decision"], "auto_accepted": result["auto_accepted"],
+               "claim": _claim_view(result["claim"]),
+               "closest": result["closest"]}
+        if result["auto_accepted"]:
+            # Accepted memory changed without a review: publish the core like a review would.
+            core = self._republish_core()
+            if core is not None:
+                out["core"] = core
+        return out
 
     def review(self, body: dict) -> dict:
         action = body.get("action")
@@ -2026,6 +2048,7 @@ def main(argv=None) -> int:
                 owner_episodes=owner_episodes,
                 owner_min_score=args.owner_min_score, owner_prefetch=args.owner_prefetch == "on",
                 prefetch_log=prefetch_log, gate=gate, reranker=reranker, miss_capture=miss_capture)
+    app.ensure_core_published()
     server = SidecarServer(args.socket or default_socket(), app, mode=int(args.mode, 8))
     # The reranker loads in the background after bge-m3's warmup (two large loads at once
     # would compete for the CPU quota); turns keep the cosine gate until it is ready.

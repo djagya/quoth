@@ -58,6 +58,11 @@ the `v*` tags.
 
 ### Health
 
+- **The sidecar keeps the published core current outside reviews too.** At startup it publishes
+  the core when the published one is missing or stale (`core_freshness`), and an auto-accepted
+  proposal republishes it like a review does (`core` in the propose reply). `/v1/core` serves
+  the published file once one exists, so a core left behind by an operator's CLI accept or an
+  older release is no longer served until the next review.
 - **A stale core turns health red.** With a core directory (`/v1/health` with `--core-dir`,
   `quoth ledger health --core-dir DIR`), health compiles the core in memory and compares its
   claim ids with the published `core.json`: `core: {status, published_sha, missing, extra,
