@@ -52,6 +52,13 @@ def test_review_skill_publishes_core_without_host_paths():
     assert not re.search(r"quoth-\d+\.\d+\.\d+", skill)
 
 
+def test_review_skill_presort_has_a_second_look_at_accepts():
+    skill = (SKILLS / "memory-review" / "SKILL.md").read_text(encoding="utf-8")
+    first, second, done = (skill.index(s) for s in (
+        "The bar for `accept`", "Second look at every `accept`", "covered every `accept`"))
+    assert first < second < done < skill.index("## 2. Open the review")
+    assert "action=queue suggested=true" in skill
+
 def test_no_deployment_specific_content():
     for path in SKILLS.rglob("SKILL.md"):
         text = path.read_text(encoding="utf-8")

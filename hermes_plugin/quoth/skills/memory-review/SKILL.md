@@ -1,7 +1,7 @@
 ---
 name: memory-review
 description: "Use when the owner asks to review memory, or answers a memory-review nudge: presort the Quoth queue yourself, then walk the owner through it topic by topic in short numbered rounds and apply exactly what they answer."
-version: 3.7.0
+version: 3.8.0
 author: quoth
 ---
 
@@ -56,7 +56,20 @@ carries their exact words.
 3. Re-suggesting replaces the earlier suggestion; the topic is kept when you
    omit it. When an operator asks for a re-presort, re-suggest every pending
    claim under these rules, including ones already suggested.
-4. Done when `action=digest` shows `plan.unsorted` = 0.
+4. **Second look at every `accept`** (required; the first pass lets through
+   about half of what fails the bar). Page `action=queue suggested=true` and
+   take each claim whose suggestion is `accept`. Ask of its `text`, one by one:
+   - Is it about the owner, not about you, a tool or a setup?
+   - Will it still be true in a few months, not a task or project status?
+   - Would the owner want it said in every new conversation?
+   A single "no", or a "maybe", re-suggests it: `covered` (with the locator)
+   when their notes say it, `stale` when no longer true, else `reject` (with
+   `note: "unsure"` when you cannot tell). Imported claims (`origin`
+   `imported`) fail most often: an assistant wrote them down, not the owner.
+   When a dropped claim was the target of duplicates, re-point them at a
+   claim that stays or reject them too.
+5. Done when `action=digest` shows `plan.unsorted` = 0 and the second look
+   covered every `accept`.
 
 ## 2. Open the review
 

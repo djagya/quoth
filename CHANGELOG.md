@@ -3,6 +3,16 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
+## Unreleased
+
+### Review
+
+- **Presort takes a second look at every `accept`** (`memory-review` skill 3.8.0). After the
+  first pass the assistant pages its `accept` suggestions and asks three questions of each
+  wording (about the owner? true in a few months? worth saying in every conversation?); any
+  "no" or "maybe" becomes `covered`, `stale` or `reject`. On the box the 3.7.0 rules alone
+  moved 7 of 47 seed-import accepts; a second look moved 24 more.
+
 ## 0.19.0 — "what was it before", the short rule under rerank, judged sweep precision
 
 No index-contract file and no ledger migration changed since 0.18.2: 0.17 snapshots keep serving.
