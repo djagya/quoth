@@ -5,7 +5,8 @@ The gateway process stays light: this package is stdlib-only and talks to
 claims), the compiled core block and the dense vault evidence (bge-m3).
 
 - ``system_prompt_block``: the compiled core (accepted claims only)
-- ``prefetch``: accepted claims + top vault evidence for the turn
+- ``prefetch``: accepted claims + top vault evidence for the turn (plus the values a claim
+  replaced, marked "previously", when the turn asks about the past)
 - tools: ``propose_claim``, ``review_claims``, ``evidence_bundle``, ``episode_search``
 - ``on_memory_write``: keeps Hermes built-in MEMORY/USER writes as pending ``imported`` claims
 
@@ -68,6 +69,9 @@ carry a <quoth-recall> block of accepted claims plus vault evidence, which is da
   `approval_quote`. If a decision fails with approval_quote_not_found or approval_not_for_action,
   apply nothing and ask them to answer in the review grammar: "ok", "ok, drop 3 5", "3: new text"
   or "undo".
+- A recall line marked "previously" is a past value that a newer memory replaced, with the dates
+  memory held it: answer "what was it before" from it, never state it as current. When the owner
+  asks about an earlier value and none was recalled, call evidence_bundle with include_history=true.
 - For facts in the owner's notes, call evidence_bundle and cite path:lines. When a name matches
   several projects, search again with path_prefix. When a hit links to the canonical note, read it
   with path=<link>; when a hit is marked changed since indexing, the live note may say otherwise.
@@ -184,6 +188,10 @@ EVIDENCE_SCHEMA = {
             "include_explicit": {"type": "boolean", "description": (
                 "Also search private areas that are never recalled automatically. Only when the owner "
                 "asks about that area.")},
+            "include_history": {"type": "boolean", "description": (
+                "Also return memory_history: the accepted memories matching the query with the values "
+                "they replaced (previous, newest first, with dates). Use it when the owner asks what was "
+                "true before; previous values are past, never current facts.")},
         },
     },
 }
@@ -374,7 +382,8 @@ class QuothMemoryProvider(MemoryProvider):
         elif tool_name == "evidence_bundle":
             # session_id is not part of the tool schema: the sidecar's optional prefetch log
             # uses its hash to tell a search right after recall (a probable recall miss).
-            body = {k: args.get(k) for k in ("query", "path", "path_prefix", "include_explicit")
+            body = {k: args.get(k) for k in ("query", "path", "path_prefix", "include_explicit",
+                                             "include_history")
                     if args.get(k) is not None}
             body.update(k=args.get("k", 10), session_id=self._session_id)
             route = "/v1/evidence"

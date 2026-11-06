@@ -35,6 +35,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
+from ..history import span
 from ..ledger import core as ledger
 from ..ledger.compile import compile_core, published_core
 
@@ -419,6 +420,8 @@ class MemoryViews:
         detail = out.get("detail") or {}
         claims = [{**{k: c.get(k) for k in ("id", "kind", "authority", "text", "cosine")},
                    "match": "cosine" if c.get("cosine") is not None else "words"}
+                  | ({"match": "history", "history_of": c.get("history_of"), "span": span(c)}
+                     if c.get("history_of") else {})
                   for c in detail.get("claims", []) if isinstance(c, dict)]
         return {"text": out.get("text", ""), "claims": claims,
                 "evidence": [{"locator": e.get("locator"), "note_date": e.get("note_date")}

@@ -1,7 +1,7 @@
 ---
 name: memory-caller
 description: Use when the owner's memory could improve an answer. Apply read-only retrieval and evidence rules.
-version: 2.0.0
+version: 2.1.0
 metadata:
   hermes:
     tags: [memory, retrieval, evidence, privacy]
@@ -33,5 +33,6 @@ Skip retrieval when the immediate context is sufficient or the request is generi
 - Preserve snapshot and locator provenance. Distinguish current authority from historical or draft material and state the relevant time basis.
 - A miss is not evidence of absence. Never infer a count or absence from top-k retrieval.
 - Tool success is not answer success. Contradictory, inadequate, stale, or wrong-authority evidence requires qualification or abstention.
+- Past values of memory: a recall line marked "previously (from … until …)" is a value a newer accepted memory replaced. Use it to answer what was true before, say it was the earlier value, and never present it as current. Its dates are when memory held it, not when it was true in the world. When the owner asks about an earlier value and recall showed none, call `evidence_bundle` with `include_history: true`: its `memory_history` lists each matching memory with the values it replaced, newest first.
 - For `last/first/before/after/as-of`, dense rank is not chronology; file mtime and snapshot-ingest time are not event time. Assert order only from explicit, provenance-bearing dated evidence. Otherwise qualify or abstain.
 - Each hit carries `note_date` and `date_basis`. Only `validated_note_date` (filename date equals frontmatter `created`) is a dated anchor; `filename_only` is weaker, `none`/null is undated. `note_date` is when the note was written, not when the event happened; never rank hits by it as a substitute for event time, and say which basis you used.

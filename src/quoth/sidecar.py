@@ -54,6 +54,7 @@ from .ledger.authored import (StateDbVerifier, approval, find_authored, is_assen
                               previous_authored)
 from .claim_index import ClaimIndex
 from .ledger.compile import compile_core, core_freshness, publish_core, published_core
+from . import history
 from . import recall_defaults as D
 from . import relevance
 
@@ -166,6 +167,13 @@ def _opt_float(body: dict, key: str) -> float | None:
     return float(value)
 
 
+def _opt_bool(body: dict, key: str) -> bool | None:
+    value = body.get(key)
+    if value is not None and not isinstance(value, bool):
+        raise SidecarError(f"invalid_{key}")
+    return value
+
+
 def _ids(body: dict, *, single: bool = True) -> list[int]:
     """`ids` (a list), else a single `id` when `single`; empty when neither is given."""
     raw = body.get("ids")
@@ -175,6 +183,20 @@ def _ids(body: dict, *, single: bool = True) -> list[int]:
     if not isinstance(raw, list):
         raise SidecarError("invalid_ids")
     return [_as_int(i, "ids") for i in raw]
+
+
+MEMORY_HISTORY_NOTE = ("Each item is an accepted current claim (`current`) and the values it replaced"
+                       " (`previous`, newest first): past values, not current facts. `valid_from` and"
+                       " `valid_to` are when memory held each one, not when it was true in the world.")
+
+
+def _memory_item(c: dict) -> dict:
+    """A claim in `memory_history`: a current one, or a past value with its dates."""
+    out = {k: c[k] for k in ("id", "kind", "authority", "text")}
+    if c.get("history_of"):
+        out.update(valid_from=c.get("valid_from"), valid_to=c.get("valid_to"),
+                   replaced_by=c.get("superseded_by"), label=f"previously ({history.span(c)})")
+    return out
 
 
 def _claim_view(c: dict) -> dict:
@@ -360,6 +382,12 @@ class Quoth:
         unavailable, failing or `busy` (the previous turn's scoring still running) leave the
         turn on the cosine gate with its hits (`status.rerank` says which). Without a rerank
         threshold (score-only) only dry runs score: live turns are untouched.
+
+        A turn that asks about the past (`history.wants_history`: the lexical detector, or
+        `include_history` true; false turns it off) also gets the past values of its pool's
+        claims (`ledger.history`, one query): each injected claim is followed by what it
+        replaced, newest first, labelled "previously" with its dates, within the same
+        PREFETCH_CLAIMS cap. Other turns run no extra query.
         """
         started = time.monotonic()
         dry = bool(body.get("dry_run"))
@@ -373,6 +401,7 @@ class Quoth:
         k_evidence = _int(body, "k_evidence", PREFETCH_EVIDENCE, 0, MAX_CANDIDATES)
         k_claims = _int(body, "k_claims", PREFETCH_CLAIMS, 1, MAX_CANDIDATES)
         k_rerank_asked = _int(body, "k_rerank", 0, 0, MAX_CANDIDATES)
+        include_history = _opt_bool(body, "include_history")
         if not dry:
             self._last_query_session = session_id
         self._last_query_at = started
@@ -384,6 +413,7 @@ class Quoth:
             if self.miss_capture is not None and not dry:
                 self.miss_capture.close_turn(session_id)
             return {"text": "", "claims": 0, "evidence": 0, "evidence_status": "skipped"}
+        past = history.wants_history(include_history, query)  # "flag" | "intent" | None
         budget = self.evidence_budget
         if dry and evidence_budget is not None:
             # Eval runs measure retrieval, not the live time budget (capped).
@@ -475,27 +505,49 @@ class Quoth:
                 claim_gate[c["id"]] = relevance.judge_claim(self.gate, query_terms, c, cosine,
                                                             claims_rerank.get(c["id"]), rr.claims)
         claims = [c for c in pool_claims if claim_gate[c["id"]]["passed"]][:k_claims]
+        served, past_values = claims, {}
+        if past:
+            # The past path (a past-intent turn, or the caller's flag): one recursive query
+            # for the pool's past values; each passing claim then brings its own, newest
+            # first, inside the same claims cap. Other turns never run it.
+            t2 = time.monotonic()
+            with self.lock:
+                past_values = ledger.history(self.conn, [c["id"] for c in pool_claims])
+            ms["claims_history"] = _ms(t2)
+            served = history.interleave([c for c in pool_claims if claim_gate[c["id"]]["passed"]],
+                                        past_values, k_claims, D.HISTORY_PER_CLAIM)
+            claims = [c for c in served if not c.get("history_of")]
         if not dry:
-            with self.lock:  # use_count counts what was injected, after the gate
+            with self.lock:  # use_count counts what was injected, after the gate (current claims)
                 ledger.mark_claims_used(self.conn, [c["id"] for c in claims])
         note = _vault_note(status, bool(hits_all[:vault_pool]), bool(hits))
-        out = {"text": format_recall(claims, hits, note, provenance.get("indexed_at")), "claims": len(claims),
+        out = {"text": format_recall(served, hits, note, provenance.get("indexed_at")), "claims": len(served),
                "evidence": len(hits), "evidence_status": status}
+        if past:
+            out["history"] = {"asked": past, "items": len(served) - len(claims)}
         if dry:
             out["detail"] = {"claims": [{"id": c["id"], "kind": c["kind"], "authority": c["authority"],
-                                         "text": c["text"], "cosine": scores.get(c["id"])} for c in claims],
+                                         "text": c["text"], "cosine": scores.get(c["id"])}
+                                        | ({k: c[k] for k in ("history_of", "valid_from", "valid_to")}
+                                           if c.get("history_of") else {}) for c in served],
                              "evidence": [{"locator": h["locator"], "note_date": h.get("note_date"),
                                            "project": h.get("project"), "live": h.get("live")}
                                           for h in hits],
                              "provenance": provenance,
                              "vault_note": note}
-        injected, picked = {c["id"] for c in claims}, set(chosen)
+        injected, picked = {c["id"] for c in served}, set(chosen)
         claim_items = []
         for c, via, in_pool in candidates:
             claim_items.append({"id": c["id"], "score": scores.get(c["id"]), "via": via, "pool": in_pool,
                                 **claim_gate[c["id"]], "injected": c["id"] in injected, "_view": c})
             if c["id"] in pair_ms["claims"]:
                 claim_items[-1]["rerank_ms"] = pair_ms["claims"][c["id"]]
+            if in_pool:
+                # Past values follow their current claim and share its gate verdict.
+                for p in past_values.get(c["id"], [])[:D.HISTORY_PER_CLAIM]:
+                    claim_items.append({"id": p["id"], "score": None, "via": "history", "pool": True,
+                                        **claim_gate[c["id"]], "injected": p["id"] in injected,
+                                        "history_of": c["id"], "_view": p})
         trace = {"stores": {"claims": claim_items,
                             "vault": [{"locator": h["locator"], "score": h.get("cosine"),
                                        "via": h.get("via"), "named": bool(h.get("named")),
@@ -503,6 +555,8 @@ class Quoth:
                                        "injected": i in picked, "_hit": h}
                                       for i, (h, g) in enumerate(zip(hits_all, vault_gate))]},
                  "status": {"vault": status}, "ms": ms, "snapshot_id": provenance.get("snapshot_id")}
+        if past:
+            trace["status"]["history"] = past
         if live_cost is not None:
             trace["live"] = {k: live_cost[k] for k in ("stats", "hashes", "unchecked")}
         for item, spent in zip(trace["stores"]["vault"], pair_ms["vault"]):
@@ -1138,6 +1192,7 @@ class Quoth:
         include_explicit = body.get("include_explicit", False)
         if not isinstance(include_explicit, bool):
             raise SidecarError("invalid_include_explicit")
+        include_history = bool(_opt_bool(body, "include_history"))
         if (query is None) == (path is None):
             raise SidecarError("invalid_evidence_request")  # exactly one of query and path
         from .evidence_service import NoteNotFound
@@ -1159,7 +1214,41 @@ class Quoth:
             if query is not None and self.miss_capture is not None:  # a search, not a path fetch
                 self.miss_capture.search(str(body.get("session_id") or ""), query, result.get("hits"),
                                          (result.get("provenance") or {}).get("snapshot_id"))
+        if include_history and query is not None:
+            result = {**result, "memory_history": self.memory_history(query)}
         return result
+
+    def memory_history(self, query: str) -> dict:
+        """`evidence_bundle(include_history=true)`: past values of the accepted claims that match
+        `query`, each under its current claim (newest first).
+
+        The claims are picked as prefetch picks them (meaning when the claim index is warm,
+        then words; the same gate), up to PREFETCH_CLAIMS; `ledger.history` adds what each
+        replaced. Claims without a past value are left out: the reply is about history.
+        """
+        terms = relevance.terms(query)
+        with self.lock:
+            lexical = ledger.recall(self.conn, query, k=CLAIM_POOL)
+        dense = []
+        queries = getattr(self.evidence, "queries", None)
+        if self.claim_index is not None and len(self.claim_index) and queries is not None:
+            try:  # the bundle just embedded this query: the vector comes from the cache
+                dense = self.claim_index.rank(queries.vector(self.model, queries.embedder(self.model), query),
+                                              CLAIM_POOL)
+            except Exception:
+                dense = []
+        scores = dict(dense)
+        with self.lock:
+            views = ledger.servable(self.conn, [cid for cid, _ in dense]) if dense else []
+            candidates = _claim_candidates(views, lexical, set(scores), {c["id"] for c in lexical})
+            current = [c for c, _, _ in candidates
+                       if relevance.judge_claim(self.gate, terms, c, scores.get(c["id"]))["passed"]]
+            current = current[:PREFETCH_CLAIMS]
+            past = ledger.history(self.conn, [c["id"] for c in current])
+        items = [{"current": _memory_item(c),
+                  "previous": [_memory_item(p) for p in past[c["id"]][:D.HISTORY_PER_CLAIM]]}
+                 for c in current if c["id"] in past]
+        return {"note": MEMORY_HISTORY_NOTE, "items": items}
 
     def mirror(self, body: dict) -> dict:
         """Hermes built-in memory writes: add/replace become pending `imported` claims."""
@@ -1633,6 +1722,7 @@ def render_view(app: "Quoth", raw: str) -> str:
         out = app.prefetch({"query": arg, "dry_run": True})
         d = out.get("detail", {"claims": [], "evidence": []})
         lines = [f"Memories ({len(d['claims'])}):"] + [
+            f"  #{c['id']} previously ({history.span(c)}): {c['text']}" if c.get("history_of") else
             f"#{c['id']} [{c['kind']}] {c['text']}" + (f"  (cosine {c['cosine']:.2f})" if c["cosine"] else "  (word match)")
             for c in d["claims"]]
         note = f", {d['vault_note'].replace('_', ' ')}" if d.get("vault_note") else ""
@@ -1673,19 +1763,32 @@ def links_fragment(hit: dict) -> str:
     return f" (links: {', '.join(names)})" if names else ""
 
 
+CLAIMS_HEADER = "Accepted memory (current; [inferred] = your reviewed inference):"
+CLAIMS_HEADER_PAST = ("Accepted memory (current; [inferred] = your reviewed inference; an indented"
+                      " \"previously\" line is a past value that a newer claim replaced, not a current fact;"
+                      " its dates are when memory held it):")
+
+
 def format_recall(claims: list[dict], hits: list[dict], vault_note: str | None = None,
                   indexed_at: str | None = None) -> str:
     """Compact per-turn context: accepted memory first, then vault evidence as data (or one
     line saying why there is none: `VAULT_NOTES`). Vault hits come under the snapshot's
-    build time; a hit whose note changed since gets a mark, and resolved links are named."""
+    build time; a hit whose note changed since gets a mark, and resolved links are named.
+    A past value (`history_of` set, `ledger.history`) is an indented "previously" line under
+    its current claim, with its dates."""
     if not claims and not hits and vault_note is None:
         return ""
     lines = ["<quoth-recall>"]
     if claims:
-        lines.append("Accepted memory (current; [inferred] = your reviewed inference):")
+        past = any(c.get("history_of") for c in claims)
+        lines.append(CLAIMS_HEADER_PAST if past else CLAIMS_HEADER)
         for c in claims:
             tag = " [inferred]" if c["authority"] == "assistant" else ""
-            lines.append(f"- #{c['id']} {c['kind']}: {c['text']}{tag}")
+            if c.get("history_of"):
+                lines.append(f"  - #{c['id']} previously ({history.span(c)}; replaced by #{c['superseded_by']},"
+                             f" not current): {c['text']}{tag}")
+            else:
+                lines.append(f"- #{c['id']} {c['kind']}: {c['text']}{tag}")
     if hits:
         label = indexed_label(indexed_at)
         if label is not None:
