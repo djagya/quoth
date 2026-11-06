@@ -5,6 +5,10 @@ the `v*` tags.
 
 ## Unreleased
 
+## 0.18.2 — clear dropped copies, a stale-core health check, stricter presort, claims gold
+
+No index-contract file and no ledger migration changed since 0.18.1: 0.17 snapshots keep serving.
+
 ### Evals
 
 - **Claims gold that survives a changing ledger.** A row can name an expected claim by an
