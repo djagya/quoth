@@ -229,6 +229,7 @@ about ±8 points wide, which is what the set can tell apart.
 | `injected_hit_rate` | answerable rows where an expected source is in the injected block |
 | `injected_mrr` | 1/position of the first expected source in the injected block (claims, vault, owner, assistant order) |
 | `injected_precision` | share of injected items matching an expected source (answerable rows with injection) |
+| `judged_precision` | the same, over items whose rightness is known: vault items, claims on rows with `claims_judged`, and any matched item. An unlabelled claim or episode is unknown, not wrong. The sweep's objective uses it |
 | `empty_rate` | rows with nothing injected |
 | `abstain_nonempty_rate` | abstain rows that still got an injection (lower is better) |
 | `stale_leak` / `stale_leak_items` | rows / items where a stale source was injected (must stay 0) |

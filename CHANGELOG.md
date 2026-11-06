@@ -14,6 +14,15 @@ the `v*` tags.
   `vault_short_min_cosine` needed) now applies on both paths; a message that names the note
   still passes. Serving without rerank rules is unchanged.
 
+### Evals
+
+- **The sweep no longer rewards injecting no claims on sets without claims gold.** Block
+  `injected_precision` counts every injected claim or episode that is not gold as wrong, so on
+  a set with no claims gold a claims gate that drops all claims looked like a precision gain.
+  New `judged_precision` counts only items whose rightness is known (vault items, claims on
+  `claims_judged` rows, any matched item); the sweep's objective uses it, so such a gate ties
+  and the gentler config wins. `injected_precision` is unchanged in receipts.
+
 ## 0.18.2 — clear dropped copies, a stale-core health check, stricter presort, claims gold
 
 No index-contract file and no ledger migration changed since 0.18.1: 0.17 snapshots keep serving.

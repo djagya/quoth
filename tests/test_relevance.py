@@ -581,3 +581,23 @@ def test_short_queries_skip_unrelated_hits_live_and_in_replay(tmp_path, state_db
         assert SW.observe("r", {**rec, "terms": None}, SHORT)["block"] > 0  # old receipt: rule skipped
     finally:
         app.close()
+
+
+def test_unlabelled_claims_do_not_count_as_wrong_in_judged_precision():
+    """On a set without claims gold, an injected claim is unknown, not wrong: a claims gate that
+    injects none must not look better (it did, by `injected_precision`)."""
+    rows = {k: {**v, "stores": {**v["stores"]}} for k, v in ROWS.items()}
+    for rid in ("a", "b"):
+        rows[rid]["stores"]["claims"] = {"expected": 0, "items": [_item(0.70, lexical=0.5), _item(0.65, lexical=0.5)]}
+    live = Gate(vault_min_cosine=0.5)
+    no_claims = Gate(vault_min_cosine=0.5, claims_min_cosine=0.9)
+    with_claims, _ = SW.evaluate(rows, live)
+    without, _ = SW.evaluate(rows, no_claims)
+    assert without["injected_precision"] > with_claims["injected_precision"]  # the old artefact
+    assert without["judged_precision"] == with_claims["judged_precision"] == round((1 / 1 + 1 / 2) / 2, 4)
+    assert SW.objective(with_claims) > SW.objective(without)  # same score: the gentler gate wins
+    # Judged claims gold makes a wrong claim count again.
+    for rid in ("a", "b"):
+        rows[rid]["claims_judged"] = True
+    judged, _ = SW.evaluate(rows, live)
+    assert judged["judged_precision"] == round((1 / 3 + 1 / 4) / 2, 4)
