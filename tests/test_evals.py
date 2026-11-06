@@ -345,7 +345,7 @@ def test_cli_sweep_and_old_receipts(built, tmp_path, capsys):
     table = capsys.readouterr().out
     assert "| no gate |" in table and "Recommended:" in table
     result = json.loads(out.read_text())
-    assert result["schema"] == "quoth-eval-sweep/v1" and {r["gate"]["vault_max_gap"] for r in result["vault"]} == {
+    assert result["schema"] == "quoth-eval-sweep/v2" and {r["gate"]["vault_max_gap"] for r in result["vault"]} == {
         None, 0.05}
     for row in load_set(SET).rows:  # configs and aggregates only
         assert row["question"] not in out.read_text() and row["id"] not in table

@@ -53,7 +53,7 @@ from .ledger import core as ledger
 from .ledger.authored import (StateDbVerifier, approval, find_authored, is_assent, is_undo,
                               previous_authored)
 from .claim_index import ClaimIndex
-from .ledger.compile import compile_core, published_core
+from .ledger.compile import compile_core, publish_core, published_core
 from . import recall_defaults as D
 from . import relevance
 
@@ -207,6 +207,7 @@ class Quoth:
         self.core_dir = Path(core_dir) if core_dir else None
         self.model = model
         self.core_budget = core_budget
+        self.last_core_publish = None  # the review's last core publish: {at, published, claims} or {at, error}
         self.evidence_budget = evidence_budget
         self._evidence_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quoth-evidence")
         self._evidence_lock = threading.Lock()
@@ -284,6 +285,8 @@ class Quoth:
                "live_check": getattr(self.evidence, "live", None) is not None}
         if self.reranker is not None:
             out["reranker"] = self.reranker.status()
+        if self.core_dir is not None:
+            out["core_publish"] = self.last_core_publish
         if self.miss_capture is not None:  # counts only: written, dropped, errors, tracked sessions
             out["miss_capture"] = self.miss_capture.counters()
         return out
@@ -295,6 +298,24 @@ class Quoth:
         with self.lock:
             compiled = compile_core(self.conn, self.core_budget)
         return {"source": "live", "file": None, "text": compiled["text"]}
+
+    def _republish_core(self) -> dict | None:
+        """Publish the core again after a review changed accepted memory; None without `core_dir`.
+
+        Same files and budget as `/v1/core` serves (`publish_core`), under the ledger lock.
+        A failure is reported (`{"error": ...}`), never raised: the review decision stands.
+        """
+        if self.core_dir is None:
+            return None
+        try:
+            with self.lock:
+                manifest = publish_core(self.conn, self.core_dir, self.core_budget)
+            out = {"published": manifest["sha256"], "claims": len(manifest["claim_ids"])}
+        except Exception as exc:
+            log.warning("core publish after review failed: %s", type(exc).__name__)
+            out = {"error": "publish_failed", "reason": type(exc).__name__}
+        self.last_core_publish = {"at": ledger._now(), **out}
+        return out
 
     def prefetch(self, body: dict) -> dict:
         """Accepted claims and vault evidence for one turn, judged before the cut.
@@ -1017,9 +1038,10 @@ class Quoth:
                 out = ledger.undo_batch(self.conn, target, via=locator) if target else None
             if out is None:
                 raise SidecarError("nothing_to_undo")
-            # The published core still holds what was accepted until it is compiled again.
+            # Reverted accepts leave the published core stale: `_with_core` publishes it again.
             stale = any(r["undone"] in ("accepted", "edited") for r in out["results"])
-            return {"action": action, "approval_locator": locator, **out, "core_stale": stale}
+            reply = {"action": action, "approval_locator": locator, **out, "core_stale": stale}
+            return self._with_core(reply, stale)
         note = f"approved via {locator}" + (f": {note_extra}" if note_extra else "")
         with self.lock:
             used = ledger.batch_used(self.conn, locator)
@@ -1031,7 +1053,16 @@ class Quoth:
                     raise SidecarError("bucket_changed")
                 if len(ids) > ledger.BUCKET_CAP:
                     raise SidecarError("bucket_too_large")
-            if used["decisions"] + len(ids) > ledger.BUCKET_CAP:
+            # A drop also rejects its family's restored copies: they count against the cap too.
+            if action == "reject":
+                dropping = ids
+            elif action == "apply":
+                dropping = [cid for cid in ids if (ledger.current_suggestion(self.conn, cid) or {})
+                            .get("action") in ledger.JUNK_BUCKETS]
+            else:
+                dropping = []
+            family = ledger.family_rejects(self.conn, dropping) - set(ids)
+            if used["decisions"] + len(ids) + len(family) > ledger.BUCKET_CAP:
                 raise SidecarError("approval_cap_reached")
             if action == "apply":
                 applied = ledger.apply_suggestions(self.conn, ids, note=note, batch=locator)
@@ -1041,7 +1072,7 @@ class Quoth:
                    "errors": [r for r in applied if "error" in r]}
             if bucket is not None:
                 out["bucket"] = bucket
-            return out
+            return self._with_core(out, any(r["review_status"] == "accepted" for r in out["results"]))
         results, errors = [], []
         for claim_id in ids:
             try:
@@ -1058,11 +1089,17 @@ class Quoth:
                                             batch=locator)
                     else:
                         out = ledger.undo_auto_accept(self.conn, claim_id, batch=locator)
-                results.append(_claim_view(out) | ({"restored_duplicates": out["restored_duplicates"]}
-                                                   if out.get("restored_duplicates") else {}))
+                results.append(_claim_view(out) | ({"family": out["family"]} if "family" in out else {}))
             except ledger.LedgerRejected as exc:
                 errors.append({"id": claim_id, "error": exc.code})
-        return {"action": action, "approval_locator": locator, "results": results, "errors": errors}
+        out = {"action": action, "approval_locator": locator, "results": results, "errors": errors}
+        # Accept, edit, forget and undo_auto change accepted memory; a reject never does.
+        return self._with_core(out, bool(results) and action != "reject")
+
+    def _with_core(self, reply: dict, changed: bool) -> dict:
+        """The review reply, plus `core` (the republished core or its error) when memory changed."""
+        core = self._republish_core() if changed else None
+        return reply | {"core": core} if core is not None else reply
 
     def evidence_bundle(self, body: dict) -> dict:
         if self.evidence is None:

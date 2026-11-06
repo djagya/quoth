@@ -266,12 +266,26 @@ def _parse_grid(raw: str | None):
     return [None if v.strip().lower() == "none" else float(v) for v in raw.split(",") if v.strip()]
 
 
+def _receipt_args(raw: list[str]) -> list[tuple[str, str]]:
+    """[(name, path)] from `PATH` or `NAME=PATH` arguments; a bare path is named by its stem."""
+    out = []
+    for arg in raw:
+        name, sep, path = arg.partition("=")
+        if not sep or not name or Path(arg).exists() or any(c in name for c in "/\\"):
+            name, path = Path(arg).stem, arg
+        out.append((name, path))
+    return out
+
+
 def _cmd_sweep(a) -> int:
     from .run import Receipt
     from .sweep import (SweepError, VAULT_GAPS, VAULT_RESCUES, CLAIMS_LEXICALS, RERANK_FLOORS, RERANK_GAPS,
                         RERANK_WIDENS, sweep, table)
     try:
-        result = sweep(Receipt.load(a.receipt).data, max_loss=a.max_loss,
+        named = _receipt_args(a.receipt)
+        receipts = (Receipt.load(named[0][1]).data if len(named) == 1
+                    else [(name, Receipt.load(path).data) for name, path in named])
+        result = sweep(receipts, reference=a.reference, max_loss=a.max_loss, max_lost_hits=a.max_lost_hits,
                        vault_cosines=_parse_grid(a.vault_cosines),
                        vault_gaps=_parse_grid(a.vault_gaps) or VAULT_GAPS,
                        vault_rescues=_parse_grid(a.vault_rescues) or VAULT_RESCUES,
@@ -398,9 +412,17 @@ def main(argv=None) -> int:
     pm.set_defaults(func=_cmd_compare)
 
     ps = sub.add_parser("sweep", help="relevance-gate thresholds replayed on a run receipt's candidates")
-    ps.add_argument("receipt", help="an `eval run` receipt (quoth >= 0.12.5)")
+    ps.add_argument("receipt", nargs="+", metavar="[NAME=]RECEIPT",
+                    help="`eval run` receipts (quoth >= 0.12.5); with several, a config must pass on each")
+    ps.add_argument("--reference", choices=("live", "none"), default="live",
+                    help="judge configs against the live gate (each receipt's recorded gate, else the serving"
+                         " default) or against no gate (the sweep up to 0.18.0); default live")
     ps.add_argument("--max-loss", type=float, default=0.01,
-                    help="largest allowed drop of vault/claims hit@5, recall@10 and injected hit rate")
+                    help="largest allowed drop of the injected hit rates and of abstain correctness against"
+                         " the reference, on each receipt")
+    ps.add_argument("--max-lost-hits", type=int, default=None,
+                    help="answerable rows the reference injects that a config may lose, per receipt (default 0"
+                         " against the live gate, no limit with --reference none)")
     ps.add_argument("--vault-cosines", help="comma list of vault floors (default: 0.01 steps over the recorded scores)")
     ps.add_argument("--vault-gaps", help="comma list of max gaps to the top hit ('none' = off)")
     ps.add_argument("--vault-rescues", help="comma list of lexical rescue shares ('none' = off)")

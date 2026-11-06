@@ -339,7 +339,7 @@ Paths default under `$QUOTH_HOME`; the Hermes `state.db` under `$HERMES_HOME`.
 | `--state-db PATH` | `$HERMES_HOME/state.db` | Hermes chat history, read-only; `''` disables quote checks and owner-authored claims |
 | `--db PATH` | off | serving snapshot or pointer; omit to run without vault evidence. A pointer is watched and admitted in the background ([snapshot admission](#snapshot-admission)) |
 | `--snapshot-watch-interval S` | 5 | seconds between checks of the `--db` pointer |
-| `--core-dir DIR` | off | published core directory (`core.md`); without it `/v1/core` compiles live |
+| `--core-dir DIR` | off | published core directory (`core.md`), republished after each review that changes accepted memory; without it `/v1/core` compiles live |
 | `--vault DIR` | off | the live vault root, read-only: each hit says whether its note changed since indexing (`live`) |
 | `--retrieval hybrid\|dense` | `dense` | vault ranking ([vault retrieval](#vault-retrieval)) |
 | `--model NAME` | `bge-m3` | query embedder |
@@ -575,7 +575,7 @@ directories sit elsewhere (the install ran inside the Hermes container), set
 
 | Task | Command |
 |---|---|
-| publish the core after a review | `quoth ledger compile-core --publish "$QUOTH_HOME/core"` (new sessions pick it up) |
+| publish the core after a review | automatic with `--core-dir`: the sidecar republishes after each review decision that changes accepted memory (`core` in the result, `core_publish` in health). By hand, or when a result reports `core.error`: `quoth ledger compile-core --publish "$QUOTH_HOME/core"` (new sessions pick it up) |
 | queue health | `quoth ledger health` (exit 1 when red) |
 | weekly reminder | `quoth ledger nudge` (one line when claims wait, nothing otherwise) |
 | import existing memory | `quoth ledger seed --file seed.jsonl`, then review |

@@ -5,6 +5,62 @@ the `v*` tags.
 
 ## Unreleased
 
+## 0.18.1 — a dropped memory takes its copies; the sidecar republishes the core
+
+No index-contract file changed since 0.18.0: 0.17 snapshots keep serving.
+
+### Review
+
+- **Dropping a memory drops its confirmed duplicates.** An owner's reject (`reject`, or
+  `apply` of a junk suggestion) no longer brings back the copies the owner had earlier
+  confirmed as its duplicates. The whole family goes in the same transaction and under the
+  same approval: copies already rejected stay rejected, and copies that are pending only
+  because the system restored them are rejected again (`family_of`), so `undo` returns them
+  with the original. The family is transitive (copies of copies). Pending `duplicate`
+  suggestions, copies the owner decided again, and accepted claims are never touched. Reject
+  results carry `family: {root, ids, rejected_now, already_rejected}` in place of
+  `restored_duplicates`, and the re-rejects count toward the 200-decision approval cap.
+  Expiry by age and latest-wins still restore copies: the owner never decided those.
+- The memory-review skill (3.4.0) reports a drop as "Dropped #X and its N confirmed copies."
+- **The sidecar republishes the core after a review.** The assistant's gateway has no `quoth`
+  command, so the core it was told to publish could go stale after accepts. With `--core-dir`,
+  each review decision that changes accepted memory (accept, edit, forget, undo_auto, an
+  apply that accepts, an undo that reverts accepts) now publishes the core under the
+  sidecar's lock at the budget it serves, and the reply carries `core: {published, claims}`.
+  A failed publish is reported as `core: {error, reason}` and never fails the decision.
+  Health shows the last attempt (`core_publish`). The memory-review skill (3.5.0) tells the
+  owner the core was updated and runs `compile-core --publish` only on a core error.
+
+### Evals
+
+- `eval sweep` judges configs against the live gate, not against no gate. The reference is
+  the receipt's recorded gate (`config.gate`), else the serving default. A config is
+  eligible only when it loses no answerable row the reference injects (`--max-lost-hits`,
+  default 0), keeps the injected hit rates within `--max-loss`, and does not raise
+  abstain_nonempty_rate by more than `--max-loss`. It is recommended only when it beats the
+  reference on the objective; otherwise the sweep says to keep the live gate. A sweep
+  against no gate could recommend a config worse than the gate already running.
+  `--reference none` keeps the old comparison.
+- `eval sweep R1 R2 …` (or `NAME=PATH`) sweeps several receipts at once: a config must be
+  eligible on each, configs rank on the pooled rows, and the output gives each receipt's
+  reference and recommended metrics. A pick tuned on one golden set can lose answers on
+  another or raise false injection on the no-memory set.
+- Rerank and claims configs keep the reference's short-query rule, and claims configs its
+  vault floor and gap. Before, rerank configs dropped the short-query rule and a claims
+  pick turned the vault gate off.
+- The sweep's JSON is now `quoth-eval-sweep/v2`. `lost_hits` and `loss` are measured
+  against the reference. New fields: `reference`, `reference_gate`, `max_lost_hits`,
+  `rows`, `gained_hits`, `abstain_rise`, and `sets` (per receipt; with several receipts
+  each config also carries its per-receipt verdict). `baseline` is still the no-gate row.
+  `receipt` is only present for a single receipt.
+
+## 0.18.0 — eval set v2 and suites, a public benchmark, quieter short messages
+
+No index change: 0.17 snapshots keep serving, no rebuild. Install the release and restart
+the sidecar. The short-message gate rule is on by default; miss capture and the suite gate
+are opt-in (`--capture-misses`, `refresh-nightly --suite`), and the nightly's old gate flags
+keep working.
+
 ### Recall
 
 - **Short messages need a shared word or a close match.** A query of at most 1 content word

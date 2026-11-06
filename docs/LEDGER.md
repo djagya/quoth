@@ -106,10 +106,28 @@ session's turn queried in the last 20 seconds. `next_offset` pages through the q
 junk bucket's `count` and `stamp`, and one group of numbered items (`topic=…`, `bucket=…`,
 or by default the first topic with something to read).
 
-**Duplicates never drop every copy.** Applying a `duplicate` needs its target to be accepted
-and current, or pending with a current `accept` suggestion; otherwise it stays pending
-(`duplicate_target_not_kept`). When the original is rejected or expires later, its rejected
-copies return to pending in the same transaction (`restored_duplicates`).
+**Duplicates fold into a claim that stays.** Applying a `duplicate` needs its target to be
+accepted and current, or pending with a current `accept` suggestion; otherwise it stays pending
+(`duplicate_target_not_kept`).
+
+**Dropping a claim drops its confirmed copies.** When the owner rejects a claim (`reject`, or
+`apply` of a junk suggestion), its family goes with it in the same transaction and under the
+same approval, with no extra review round. The family is every claim confirmed as a copy of it,
+transitively: a claim whose latest decision is a rejection as a duplicate of a family member.
+Copies already rejected stay as they are, with no new event. A copy that is pending only
+because the system restored it (`restored` with `target_dropped` in the family, and no decision
+by the owner since) is rejected again: a `rejected` event with `duplicate_of` (its original
+target), `family_of` (the dropped claim) and the same `batch`, so `undo` returns it to pending
+together with the claim. A claim with only a pending `duplicate` suggestion, a copy the owner
+decided again after a restore (accepted, edited, undone, or dropped for another reason) and
+every accepted claim are left alone. Each reject result carries `family: {root, ids,
+rejected_now, already_rejected}`, and the re-rejects count toward the approval cap. A repeat
+of the same reject is refused per id (`not_pending`) and writes nothing.
+
+**Expiry restores copies.** When a pending original ends without the owner's decision (expired
+by age, or replaced by a newer proposal for its slot, latest-wins), its rejected copies return
+to pending in the same transaction (`restored`, `target_dropped`): the owner confirmed them as
+the same fact, never that the fact is wrong, and nothing else would keep it.
 
 **Bucket apply** (`action=apply bucket=duplicate|covered|stale|reject bucket_stamp=…`)
 applies exactly the bucket the owner saw: the stamp must still match (`bucket_changed`),
@@ -125,7 +143,15 @@ rejected and the claim it replaced returns to review. A batch holding a `forget`
 `undo_auto` is refused (`not_undoable`); a claim changed since is left alone
 (`changed_since`); a second undo finds `nothing_to_undo`; an undone message cannot approve
 again (`approval_spent`). When accepts or edits were reverted the reply says
-`core_stale: true`: publish the core again.
+`core_stale: true`.
+
+**The sidecar republishes the core.** With `--core-dir`, every review decision that changes
+accepted memory (`accept`, `edit`, `forget`, `undo_auto`, an `apply` that accepts, an `undo`
+with `core_stale`) ends with `publish_core` under the sidecar's ledger lock, at the budget
+`/v1/core` serves. The reply carries `core: {"published": <sha256>, "claims": <n>}`, or
+`core: {"error": "publish_failed", "reason": <exception class>}` when publishing failed; the
+decision stands either way. Rejects and reads publish nothing. Health shows the last attempt
+(`core_publish`). Without `--core-dir` the core is compiled live and nothing is published.
 
 ## Serving
 
@@ -137,7 +163,7 @@ memory) and puts claims at cosine ≥ 0.5 first, then word matches.
 most used first, up to `budget × (1 − headroom)` characters (default 4000 × 0.8).
 `--publish DIR` writes immutable `core-<sha12>.md` and `.json` (mode 0444), atomically
 repoints `core.md` and `core.json`, and records the version in `core_versions`. The sidecar
-serves `core.md` from `--core-dir`.
+serves `core.md` from `--core-dir` and republishes it after a review changes accepted memory.
 
 ## Health
 
