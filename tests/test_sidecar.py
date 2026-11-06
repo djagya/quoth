@@ -237,6 +237,31 @@ def test_evidence_tool_matches_read_only_mcp(provider, snapshot_db):
     assert _call(provider, "evidence_bundle", query="", k=4)["error"] == "invalid_evidence_request"
 
 
+def test_evidence_tool_adds_past_values_only_when_asked(provider, served):
+    app, _ = served
+    with app.lock:
+        ids = []
+        for text in ("Alex keeps the bike in the cellar.", "Alex keeps the bike in the hallway."):
+            cid = core.propose(app.conn, text=text, kind="environment", origin="assistant_proposal",
+                               proposer="t", subject_key="bike.place")["claim"]["id"]
+            core.accept(app.conn, cid, actor="t")
+            ids.append(cid)
+    plain = _call(provider, "evidence_bundle", query="Where did Alex keep the bike?")
+    assert plain["ok"] is True and "memory_history" not in plain  # the MCP-identical reply by default
+    out = _call(provider, "evidence_bundle", query="Where did Alex keep the bike?", include_history=True)
+    history = out["memory_history"]
+    assert "not current facts" in history["note"]
+    [item] = history["items"]
+    assert item["current"]["id"] == ids[1] and "valid_to" not in item["current"]
+    [past] = item["previous"]
+    assert past["id"] == ids[0] and past["replaced_by"] == ids[1] and past["valid_to"]
+    assert past["label"].startswith("previously (from ")
+    assert out["hits"] == plain["hits"]
+    assert _call(provider, "evidence_bundle", query="bike", include_history="yes")["error"] == "invalid_include_history"
+    schema = provider.get_tool_schemas()[2]["parameters"]["properties"]["include_history"]
+    assert schema["type"] == "boolean"
+
+
 def test_core_block_and_mirror(provider, served):
     app, _ = served
     assert "Quoth memory" in provider.system_prompt_block()

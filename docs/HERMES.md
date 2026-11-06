@@ -104,7 +104,7 @@ Quote checks and both lanes currently read only sessions whose Hermes source is 
 | `prefetch` | `POST /v1/prefetch` | recall for the turn (below); only in primary sessions on an auto-recall platform, and not for trivial prompts |
 | `propose_claim` tool | `POST /v1/propose` | records a pending claim |
 | `review_claims` tool | `POST /v1/review` | reads the queue, presorts, applies the owner's decisions |
-| `evidence_bundle` tool | `POST /v1/evidence` | the same evidence as the MCP tool, byte for byte |
+| `evidence_bundle` tool | `POST /v1/evidence` | the same evidence as the MCP tool, byte for byte (plus `memory_history` when `include_history` is set) |
 | `episode_search` tool | `POST /v1/episodes` | searches earlier chats: the assistant's words or the owner's |
 | `on_memory_write` | `POST /v1/mirror` | Hermes built-in MEMORY/USER `add`/`replace` become pending `imported` claims; `remove` is ignored |
 | `/quoth` command | `POST /v1/view` | read-only text views (below) |
@@ -145,8 +145,8 @@ Decisions carry `approval_quote`, the owner's whole reply in this turn, verbatim
 review grammar and its rules are in [LEDGER.md](LEDGER.md#guided-review).
 
 **`evidence_bundle`**: `query` (1–2048 characters) or `path`, `k` (1–20, default 10), and
-optionally `path_prefix` and `include_explicit`. Same input and output as the
-[MCP tool](MCP.md#tool-evidence_bundle):
+optionally `path_prefix`, `include_explicit` and `include_history`. Without
+`include_history`, the same input and output as the [MCP tool](MCP.md#tool-evidence_bundle):
 
 - `path_prefix`: only notes under that vault folder (`PROJECTS/Atlas`); the tool tells the
   assistant to use it when a name is ambiguous across projects. Every hit carries `project`,
@@ -155,6 +155,12 @@ optionally `path_prefix` and `include_explicit`. Same input and output as the
   `#Heading`): the "follow the link" call. Hits list `links` to fetch this way.
 - `include_explicit`: also search the [explicit recall tier](#recall-tiers), only when the
   owner asks about that area.
+- `include_history` (sidecar only, with `query`): the reply also has `memory_history`:
+  `{note, items}`, where each item is an accepted current claim matching the query (picked
+  as prefetch picks claims, same gate, up to 6) with the values it replaced, newest first
+  (`previous`: `id`, `kind`, `authority`, `text`, `valid_from`, `valid_to`, `replaced_by`,
+  `label`). Claims with no past value are left out. The assistant sets it when it knows it
+  wants "what was it before" ([past values](LEDGER.md#past-values-what-was-it-before)).
 
 An unknown, purged or explicit-tier note fetched by `path` answers `404 not_found`, the same
 for every reason.
@@ -217,6 +223,13 @@ against it.
 5. **Lanes.** Up to 2 excerpts (240 characters) per enabled lane at or above its cosine
    floor (0.62), from what is left of the evidence budget, excluding the current session.
    The owner lane is on by default, the assistant lane off.
+6. **Past values.** When the turn asks about the past (a lexical detector of past intent in
+   English, Russian and German, or `include_history: true`), each injected claim brings the
+   values it replaced, newest first: at most 3 per claim, behind their claim and inside the
+   same claims cap, with the claim's gate verdict. Only accepted values a newer fact
+   superseded count (never an edit's old wording, a forgotten, rejected, expired or pending
+   claim): [past values](LEDGER.md#past-values-what-was-it-before). The path costs one
+   recursive SQL query (`ms.claims_history`); other turns run nothing extra.
 
 ### Vault retrieval
 
@@ -272,6 +285,15 @@ These are the closest notes found and may not answer the question: rely on an ex
   `[no longer in the vault]`.
 - `(links: …)` names up to 3 resolved links of the hit's chunk; the tool lists up to 5
   (`MAX_LINKS`), with unresolved and excluded targets as text only.
+- On a past-intent turn the claims header also says that an indented "previously" line is a
+  past value, and each past value sits under its current claim:
+
+  ```
+  - #15 identity: Lives in Brask.
+    - #12 previously (from 2026-03-01 until 2026-10-01; replaced by #15, not current): Lives in Quendorf.
+  ```
+
+  The dates are when memory held the value, not when it was true in the world.
 
 **Freshness cost.** Only the injected hits are checked, after the gate: one `stat` per note,
 and a sha256 only when the size matches the indexed size but the mtime does not (or the
@@ -289,7 +311,7 @@ model can tell a slow search from one that found nothing relevant:
 | `unavailable` | `Vault evidence: unavailable this turn.` |
 | every candidate failed the gate | `Vault evidence: none above the relevance floor (no close note found).` |
 
-Injected claims, and only those (after the gate), are marked used (`use_count`,
+Injected current claims, and only those (after the gate; past values are not), are marked used (`use_count`,
 `last_used_at`), which orders the core block. Background work (lane ingest and embedding,
 claim indexing, review assist) yields to live turns.
 
@@ -508,11 +530,15 @@ meanwhile.
 | `k_evidence` | 3 | vault hits injected (0–20) |
 | `k_claims` | 6 | claims injected (1–20) |
 | `k_candidates` | 0 | dry run only: deeper candidate lists per store (0–20) |
+| `include_history` | detector | true: serve past values whatever the text; false: never; absent: when the turn asks about the past |
 | `evidence_budget`, `rerank_budget` | sidecar's | dry run only, seconds, capped at 120 |
 
-Response: `text` (the recall block, or `""`), `claims`, `evidence`, `evidence_status` (`ok`,
-`slow`, `busy`, `unavailable`, `disabled`, `skipped`), and per enabled lane `episodes` /
-`episodes_status` and `owner_episodes` / `owner_episodes_status`.
+Response: `text` (the recall block, or `""`), `claims` (items injected, past values
+included), `evidence`, `evidence_status` (`ok`, `slow`, `busy`, `unavailable`, `disabled`,
+`skipped`), per enabled lane `episodes` / `episodes_status` and `owner_episodes` /
+`owner_episodes_status`, and on the past path `history`: `{asked: intent|flag, items}`.
+Past values appear in `detail.claims` and `detail.candidates.claims` with `history_of` (the
+current claim's id; `via: history`) and in `status.history`.
 
 ## Episode lanes
 

@@ -214,14 +214,21 @@ def public_run(tmp_path_factory):
 def test_public_claims_set_fills_the_claims_metrics(public_run):
     data, _ = public_run
     report = data["claims_gold"]
-    assert report["resolved"] == 4 and report["unresolved"] == {} and report["rows_excluded"] == []
-    assert report["by"] == {"id": 2, "subject_key": 1, "text": 1} and report["followed"]["supersede"] == 2
+    assert report["resolved"] == 12 and report["unresolved"] == {} and report["rows_excluded"] == []
+    assert report["by"] == {"id": 10, "subject_key": 1, "text": 1} and report["followed"]["supersede"] == 2
     assert report["stale"] == {"resolved": 1, "unresolved": 0}
+    # Three "what was it before" rows name the value as it was (follow: edits), and the
+    # false-positive row names the old value as a negative.
+    assert report["historical"] == 4
     claims = data["metrics"]["overall"]["stores"]["claims"]
-    assert claims["n"] == 4 and claims["judged_n"] == 6
+    assert claims["n"] == 8 and claims["judged_n"] == 10
+    assert claims["history_rate"] == 0.3  # the three past-intent rows, and only those
     for key in ("hit@5", "injected_hit_rate"):
         assert 0.0 <= claims[key] <= 1.0
     assert data["metrics"]["overall"]["stale_leak"] == 0
+    assert data["metrics"]["overall"]["negative_leak_rate"] == 0.0  # "Before I go, …" brought no past value
+    history = data["metrics"]["by_kind"]["knowledge_update"]["stores"]["claims"]
+    assert history["n"] == 3 and history["recall@5"] == 1.0 and history["injected_hit_rate"] == 1.0
     blob = json.dumps(data)
     for row in load_set(CLAIMS_SET).rows:
         for anchor in claim_anchors(row):

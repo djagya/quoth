@@ -283,7 +283,7 @@
             },
             "claim": {
               "type": "object",
-              "description": "claims store only: a ledger-stable anchor, resolved against the target ledger at run time (by id when its text still matches, else by text, else by subject_key; followed through edits and supersedes to the current claim)",
+              "description": "claims store only: a ledger-stable anchor, resolved against the target ledger at run time (by id when its text still matches, else by text, else by subject_key; followed through edits and supersedes to the current claim, or as its follow says)",
               "additionalProperties": false,
               "required": [
                 "text"
@@ -303,6 +303,14 @@
                 "subject_key": {
                   "type": "string",
                   "minLength": 1
+                },
+                "follow": {
+                  "enum": [
+                    "current",
+                    "edits",
+                    "none"
+                  ],
+                  "description": "current (default): to the claim that holds the slot now; edits: through rewordings only, the value as it was (a superseded value resolves as historical); none: that exact claim"
                 }
               }
             }

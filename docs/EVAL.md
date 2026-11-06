@@ -62,7 +62,7 @@ fields: every v1 row is a valid v2 row, v1 manifests still load, and `write_set`
   - `{path}`: a vault-relative note path (vault only);
   - `{locator}`: `path:start-end`, `hermes:<session>:<message>`, or `claim:<id>`;
   - `{claim_text_contains}` or `{subject_key}`: claims only;
-  - `{claim: {text, id?, subject_key?}}`: claims only, a ledger-stable anchor resolved
+  - `{claim: {text, id?, subject_key?, follow?}}`: claims only, a ledger-stable anchor resolved
     against the target ledger at run time and followed through edits and supersedes
     ([Claims gold](#claims-gold)); the way to name an expected claim on a ledger that changes;
   - `{text_contains}`: a case-insensitive substring of the candidate's text.
@@ -184,33 +184,51 @@ row names an expected claim by an anchor instead:
 ```
 
 `text` (required) is the claim's full text when it was labelled; `id` (its id in the ledger
-it was labelled on) and `subject_key` are optional. At the start of a run each anchor is
-resolved against the target ledger:
+it was labelled on), `subject_key` and `follow` are optional. At the start of a run each
+anchor is resolved against the target ledger:
 
 1. **The labelled claim**: the claim `id` when its text still equals `text` (case, spacing
    and final punctuation aside), else every claim with that text (nothing is deleted from a
    ledger, so an edited or superseded claim is still there), else the one accepted current
    claim of `subject_key`.
-2. **Followed forward** through `superseded_by`, by edits and supersedes, to the claim that
-   holds the slot now. It must be accepted and current; the anchor then matches
-   `claim:<id>` for this run. A `stale` anchor is not followed: the stale value is that exact
-   claim.
+2. **Followed** as `follow` says:
+   - `current` (default): forward through `superseded_by`, by edits and supersedes, to the
+     claim that holds the slot now. It must be accepted and current.
+   - `edits`: forward through the owner's edits only (rewordings of the same value), stopping
+     at a supersede: the gold is the value as it was. A value that a newer fact replaced
+     (accepted, superseded, never forgotten) resolves as `historical`; recall serves it as a
+     past value on a past-intent turn ([LEDGER.md](LEDGER.md#past-values-what-was-it-before)).
+     Use it for "what was X before" rows.
+   - `none`: that exact claim, current or historical.
+   The anchor then matches `claim:<id>` for this run. A `stale` anchor is not followed: the
+   stale value is that exact claim. The `subject_key` fallback finds only the current value,
+   so it applies to `current` anchors only.
 3. **Otherwise unresolved**, with a reason: `not_found`, `ambiguous` (it leads to several
-   current claims), `pending`, `rejected`, `expired`, `forgotten`, or `no_ledger`.
+   claims), `pending`, `rejected`, `expired`, `forgotten`, `edited` (a `none` anchor on an old
+   wording an edit replaced: never served), or `no_ledger`.
 
 Unresolved gold is taken out of the row and reported apart, never counted as a miss. A row
 left with no expected source is not scored (`rows_excluded`); a row that keeps other sources
 is scored on them and loses `claims_judged` (`rows_partial`). The receipt's `claims_gold`
 holds counts and row ids only: anchors and how many resolved, `by` (`id`, `text`,
-`subject_key`), `followed` (`edit`, `supersede` steps), `unresolved` by reason, and `stale`
-anchors found. An in-process run uses its own ledger; a `--socket` run resolves against
+`subject_key`), `followed` (`edit`, `supersede` steps), `unresolved` by reason, `historical`
+(anchors resolved to a past value; only when there are any), and `stale` anchors found. An in-process run uses its own ledger; a `--socket` run resolves against
 `--ledger DB` opened read-only (without it every anchor is `no_ledger`). The nightly suite
 gate scores with an empty ledger: its anchors resolve `not_found`, so claims-only rows are
 left out and the others are scored on their vault gold.
 
 Gold that a supersede carried forward is the claim that holds the slot now. When the owner
 labelled a value that has since changed (a city, a server name), the row then expects the
-new value; `followed.supersede` shows how many anchors moved that way.
+new value; `followed.supersede` shows how many anchors moved that way. A row that asks what
+the value was before keeps it with `follow: edits`:
+
+```json
+{"store": "claims", "match": {"claim": {"text": "The build server is called anvil.", "id": 11,
+                                        "follow": "edits"}}}
+```
+
+A past value injected under its current claim matches such gold like any claim, so it counts
+as a hit (`injected_hit_rate`, `stores.claims.recall@k`).
 
 ### Metrics
 
@@ -233,7 +251,8 @@ about ±8 points wide, which is what the set can tell apart.
 | `empty_rate` | rows with nothing injected |
 | `abstain_nonempty_rate` | abstain rows that still got an injection (lower is better) |
 | `stale_leak` / `stale_leak_items` | rows / items where a stale source was injected (must stay 0) |
-| `latency_ms.STAGE.{p50,p95,max}` | `wall` (harness), `total`, `claims_lexical`, `vault`, `claims_dense`, `owner`, `assistant`, `live` (freshness of the injected hits), `explicit` (the explicit bundle), `explicit_live`; nearest-rank percentiles |
+| `stores.claims.history_rate` | rows where a past value was injected (the past path ran and found one); on a set of present-tense questions it is the detector's false-positive rate |
+| `latency_ms.STAGE.{p50,p95,max}` | `wall` (harness), `total`, `claims_lexical`, `claims_history` (past-intent rows only), `vault`, `claims_dense`, `owner`, `assistant`, `live` (freshness of the injected hits), `explicit` (the explicit bundle), `explicit_live`; nearest-rank percentiles |
 | `explicit.hit@k` (k 1, 3, 5, 10), `explicit.recall@10` | the explicit `evidence_bundle` (k 10) over rows with vault gold: an expected path in its top k; mean share of expected paths in the top 10 |
 | `explicit.repeat_rate` | share of explicit hits whose note already appeared earlier in the same bundle |
 | `explicit.changed_hits` | explicit hits marked `changed` since indexing (with `--vault`) |
@@ -255,7 +274,7 @@ gate scores with the same candidates and matching.
             "gold_drift", "rerank": {"model", "repo", "revision", "budget", "claims", "max_tokens"}},
  "status": "ok|gold_drift_excessive", "gold_drift": {"renamed", "stale", "ids"},
  "claims_gold": {"anchors", "resolved", "by", "followed", "unresolved", "rows_excluded", "rows_partial", "ledger",
-                 "stale"}, "scored": 29,
+                 "historical", "stale"}, "scored": 29,
  "metrics": {"overall", "by_kind", "by_origin", "by_lang"}, "explicit": {"calls", "rows", "hit@1", "hit@3",
              "hit@5", "hit@10", "recall@10", "repeat_rate", "changed_hits"},
  "latency_ms": {}, "statuses": {},
@@ -639,10 +658,14 @@ Synthetic text only:
   `state.db` and ingests both lanes (a scheduled-run row and a too-short reply are dropped);
 - `set.jsonl` and its manifest: 29 rows covering every kind, including follow-ups with
   `context`, knowledge updates with `stale`, unanswerables and lane rows;
-- `claims.jsonl` and its manifest: 6 claims-gold rows on the seed, all `claims_judged`: an
+- `claims.jsonl` and its manifest: 10 claims-gold rows on the seed, all `claims_judged`: an
   anchor found by id, one by text under a foreign id, one by `subject_key` after a rewording,
-  two followed past a supersede, a stale anchor, and two vault rows where no claim is right
-  (so CI covers resolution and judged precision). The `public` suite runs it as `claims`.
+  two followed past a supersede, a stale anchor, two vault rows where no claim is right
+  (so CI covers resolution and judged precision), three "what was it before" rows
+  (`h01`–`h03`, tag `history`: the old value with `follow: edits` plus the current one) and
+  one past-intent false positive (`f01`, "Before I go, …": the old value as a `none`
+  negative, so `negative_leak_rate` shows a wrongly served past value). The `public` suite
+  runs it as `claims`.
 
 ```sh
 uv run quoth eval fixture --out /tmp/quoth-fixture      # hash-ngram, no model files
@@ -907,6 +930,11 @@ installed: `dense_unavailable` in the summary). Rows with candidates are written
                                            "lexical": 0.5}]}}}
 ```
 
+A row whose question asks about the past (the recall path's past-intent detector: "before",
+"used to", "what was", "раньше", "früher", a past year) is also offered the ledger's past
+values, marked `historical` with the date memory stopped holding them, and its label has
+`past_intent: true`. The summary counts `past_intent` rows and `past_values`.
+
 Every other row is copied unchanged (abstain, draft, rejected and all-of rows, rows that
 already have claims gold or `claims_judged`, rows with no candidate). NEWSET is a new file
 (the input is never overwritten), `private` with mode 0600 (`--privacy public` only from a
@@ -919,7 +947,7 @@ with their scores.
 
 | Answer | Effect |
 |---|---|
-| `1` or `1,3` | these claims are right: added as anchors (`{text, id, subject_key}`) with `claims_judged: true` |
+| `1` or `1,3` | these claims are right: added as anchors (`{text, id, subject_key}`, plus `follow: edits` for a past value) with `claims_judged: true` |
 | `n` | no candidate is right: `claims_judged: true` with no claims gold, so any claim injected there counts as wrong |
 | `d` | dismiss: the row goes back unjudged |
 | `s` / `q` | skip (stays pending) / quit |
@@ -927,7 +955,7 @@ with their scores.
 Each decision restores the row's own provenance (so it is scored again), records
 `meta.claims_label: {state: confirmed|dismissed, scorer, proposed, chosen, by, at}` without
 the candidates' text, and rewrites NEWSET at once. With `--ledger`, a picked claim must still
-be accepted and current there. Once no row is pending, NEWSET is the set to run; its claims
+be accepted and current there (or, for a past value, still a past value). Once no row is pending, NEWSET is the set to run; its claims
 gold keeps resolving as the ledger changes ([Claims gold](#claims-gold)).
 
 ## The nightly gate and daily quality

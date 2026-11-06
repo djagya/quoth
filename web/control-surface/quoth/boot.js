@@ -910,7 +910,8 @@
           const body = node('div', undefined, 'quoth-slip-body'); li.append(body);
           body.append(node('p', c.text, 'quoth-claim-text'));
           const meta = node('p', undefined, 'quoth-meta quoth-slip-meta'); body.append(meta);
-          meta.append(node('span', c.match === 'cosine' ? 'meaning match, cosine ' + Number(c.cosine).toFixed(2) : 'word match'));
+          meta.append(node('span', c.match === 'history' ? 'past value, ' + c.span + ' (replaced, not current)'
+            : c.match === 'cosine' ? 'meaning match, cosine ' + Number(c.cosine).toFixed(2) : 'word match'));
           if (c.match === 'cosine') meter(meta, Number(c.cosine), 1, 'cosine ' + Number(c.cosine).toFixed(2));
           meta.append(node('span', c.kind.replace('_', ' ')), node('span', 'from ' + who(c)));
           memoryLink(c.id, meta);

@@ -76,6 +76,7 @@ def _phrases():
         ("HERMES.md", r"floor \(([\d.]+)\), from what is left", _g(D.OWNER_MIN_SCORE)),
         ("HERMES.md", r"\| `k_evidence` \| (\d+) \|", str(D.PREFETCH_EVIDENCE)),
         ("HERMES.md", r"\| `k_claims` \| (\d+) \|", str(D.PREFETCH_CLAIMS)),
+        ("HERMES.md", r"at most (\d+) per claim, behind", str(D.HISTORY_PER_CLAIM)),
         ("EVAL.md", r"injects the top (\d+) vault hits", str(D.PREFETCH_EVIDENCE)),
         ("EVAL.md", r"and up to (\d+) claims whatever", str(D.PREFETCH_CLAIMS)),
         ("EVAL.md", r"\(the (\d+) best vault hits", str(D.VAULT_POOL)),

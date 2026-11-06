@@ -1011,6 +1011,64 @@ def servable(conn, claim_ids: Iterable[int]) -> list[dict]:
     return out
 
 
+MAX_HISTORY_STEPS = 32  # supersede and edit links walked back from one current claim
+
+
+def history(conn, claim_ids: Iterable[int], *, max_steps: int = MAX_HISTORY_STEPS) -> dict[int, list[dict]]:
+    """The past values of accepted current claims: {claim id: [past value, newest first]}.
+
+    One recursive query walks each claim's `supersedes` links back. A link counts only when
+    it was applied (the older claim's `superseded_by` is the newer one). Along the way:
+
+    - an owner's edit (`proposer = review_edit`) rewords the same value: its predecessor is
+      never a past value of its own, and the value's start is the earliest wording's;
+    - a supersede by a newer fact makes the older claim a past value when it was accepted
+      (and so has a `valid_to`), never forgotten. Anything else (pending, expired, rejected,
+      forgotten, a link that was never applied) ends the walk there.
+
+    Each past value is the claim's view (its latest wording) plus `valid_from` (when memory
+    first held that value), `valid_to` (when a newer one replaced it), `superseded_by` and
+    `history_of` (the current claim asked about). Claims that are not accepted and current
+    get no entry. Read-only.
+    """
+    ids = sorted({int(i) for i in claim_ids})
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    rows = conn.execute(
+        "WITH RECURSIVE chain(anchor, id, depth) AS ("
+        f" SELECT id, id, 0 FROM claims WHERE id IN ({marks})"
+        " UNION ALL SELECT chain.anchor, c.supersedes, chain.depth + 1 FROM chain"
+        " JOIN claims c ON c.id = chain.id WHERE c.supersedes IS NOT NULL AND chain.depth < ?)"
+        " SELECT chain.anchor AS anchor, claims.* FROM chain JOIN claims ON claims.id = chain.id"
+        " ORDER BY chain.anchor, chain.depth", (*ids, max_steps)).fetchall()
+    chains: dict[int, list] = {}
+    for row in rows:
+        chains.setdefault(row["anchor"], []).append(row)
+    out: dict[int, list[dict]] = {}
+    for anchor, chain in chains.items():
+        head = chain[0]
+        if head["review_status"] != "accepted" or head["valid_to"] is not None \
+                or head["superseded_by"] is not None:
+            continue
+        past: list[dict] = []
+        for newer, older in zip(chain, chain[1:]):
+            if older["superseded_by"] != newer["id"]:
+                break  # proposed as a supersede, never applied
+            if newer["proposer"] == "review_edit":
+                if past and older["valid_from"] and (not past[-1]["valid_from"]
+                                                    or older["valid_from"] < past[-1]["valid_from"]):
+                    past[-1]["valid_from"] = older["valid_from"]  # an earlier wording of that value
+                continue
+            if older["review_status"] != "accepted" or older["valid_to"] is None or older["forget_reason"]:
+                break
+            past.append(_view(older) | {"valid_from": older["valid_from"], "valid_to": older["valid_to"],
+                                        "superseded_by": newer["id"], "history_of": anchor, "current": False})
+        if past:
+            out[anchor] = past
+    return out
+
+
 def claim_events(conn, claim_id: int, *, detail: bool = False) -> list[dict]:
     """A claim's audit trail, oldest first; `detail` adds each event's decoded JSON detail."""
     out = []

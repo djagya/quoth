@@ -48,7 +48,10 @@ MATCH_KEYS = {
     # (`claims_gold.resolve`): {text, id?, subject_key?}. The only key with an object value.
     "claim": ("claims",),
 }
-CLAIM_ANCHOR_KEYS = {"text", "id", "subject_key"}
+CLAIM_ANCHOR_KEYS = {"text", "id", "subject_key", "follow"}
+# How far a claim anchor follows the ledger (`claims_gold`): to the claim that holds the slot now
+# (default), through the owner's rewordings only (the value as it was), or not at all.
+FOLLOW_MODES = ("current", "edits", "none")
 MAX_CLAIM_TEXT = 600  # ledger.core.MAX_CLAIM_CHARS
 ROW_KEYS = {"id", "question", "lang", "asked_at", "context", "kind", "origin", "expect", "tags", "meta",
             "split", "cluster", "hops", "abstain_reason", "provenance", "paraphrase_of"}
@@ -140,9 +143,10 @@ def _source_errors(rid: str, where: str, sources) -> list[str]:
 
 def _anchor_errors(tag: str, value) -> list[str]:
     """A claim anchor: the claim's full text when labelled, plus optionally its id in the
-    ledger it was labelled on and its subject_key (fallbacks when the text moved)."""
+    ledger it was labelled on and its subject_key (fallbacks when the text moved), and
+    `follow` (`FOLLOW_MODES`, default current)."""
     if not isinstance(value, dict) or not value or set(value) - CLAIM_ANCHOR_KEYS or "text" not in value:
-        return [f"{tag} must be an object with text and only id, subject_key besides"]
+        return [f"{tag} must be an object with text and only id, subject_key, follow besides"]
     errors = []
     text = value["text"]
     if not isinstance(text, str) or not text.strip() or len(text) > MAX_CLAIM_TEXT:
@@ -151,6 +155,8 @@ def _anchor_errors(tag: str, value) -> list[str]:
         errors.append(f"{tag}.id must be a positive integer")
     if "subject_key" in value and (not isinstance(value["subject_key"], str) or not value["subject_key"].strip()):
         errors.append(f"{tag}.subject_key must be a non-empty string")
+    if "follow" in value and value["follow"] not in FOLLOW_MODES:
+        errors.append(f"{tag}.follow must be one of {', '.join(FOLLOW_MODES)}")
     return errors
 
 

@@ -37,14 +37,23 @@ def _now() -> str:
     return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
-def accepted_claims(ledger) -> list[dict]:
-    """Accepted current claims of a ledger file: what prefetch may inject (read-only)."""
+def accepted_claims(ledger, *, past: bool = False) -> list[dict]:
+    """Accepted current claims of a ledger file: what prefetch may inject (read-only). With
+    `past`, also the values they replaced (`ledger.core.history`), marked `historical` with
+    the date memory stopped holding them: what a past-intent turn may inject."""
+    from ..ledger.core import history
     resolver = Resolver.open(ledger)
     try:
-        return [{"id": r["id"], "text": r["text"], "subject_key": r["subject_key"], "kind": r["kind"]}
-                for r in resolver.conn.execute(
-                    "SELECT id, text, subject_key, kind FROM claims WHERE review_status = 'accepted'"
-                    " AND valid_to IS NULL AND superseded_by IS NULL ORDER BY id")]
+        out = [{"id": r["id"], "text": r["text"], "subject_key": r["subject_key"], "kind": r["kind"]}
+               for r in resolver.conn.execute(
+                   "SELECT id, text, subject_key, kind FROM claims WHERE review_status = 'accepted'"
+                   " AND valid_to IS NULL AND superseded_by IS NULL ORDER BY id")]
+        if past:
+            values = history(resolver.conn, [c["id"] for c in out])
+            out += [{"id": p["id"], "text": p["text"], "subject_key": p["subject_key"], "kind": p["kind"],
+                     "historical": True, "valid_to": p["valid_to"]}
+                    for anchor in sorted(values) for p in values[anchor]]
+        return out
     finally:
         resolver.close()
 
@@ -69,7 +78,8 @@ class Scorer:
         if self.embedder is not None and claims:
             self.matrix = self.embedder.embed_passages([c["text"] for c in claims])
 
-    def top(self, question: str, k: int, min_score: float | None = None) -> list[dict]:
+    def top(self, question: str, k: int, min_score: float | None = None, past: bool = False) -> list[dict]:
+        """The `k` best claims for `question`; past values (`historical`) only when `past`."""
         terms = self.relevance.terms(question)
         lexical = [self.relevance.coverage(terms, c["text"]) or 0.0 for c in self.claims]
         if self.matrix is not None:
@@ -77,7 +87,8 @@ class Scorer:
             scores = [float(x) for x in self.matrix @ np.asarray(self.embedder.embed_query(question))]
         else:
             scores = lexical
-        order = sorted(range(len(self.claims)), key=lambda i: (-scores[i], -self.claims[i]["id"]))
+        order = sorted((i for i in range(len(self.claims)) if past or not self.claims[i].get("historical")),
+                       key=lambda i: (-scores[i], -self.claims[i]["id"]))
         out = []
         for i in order[:k]:
             # No floor by default with a model (the owner judges); words need one shared word.
@@ -87,6 +98,8 @@ class Scorer:
             item = {"id": c["id"], "text": c["text"], "score": round(scores[i], 4), "lexical": round(lexical[i], 4)}
             if c.get("subject_key"):
                 item["subject_key"] = c["subject_key"]
+            if c.get("historical"):
+                item.update(historical=True, valid_to=c.get("valid_to"))
             out.append(item)
         return out
 
@@ -108,12 +121,14 @@ def propose(set_path, ledger, out, *, model: str | None = DEFAULT_MODEL, top: in
     evalset = load_set(set_path)
     if privacy == "public" and evalset.manifest.get("privacy") != "public":
         raise LabelError("a private set's proposals stay private")
-    claims = accepted_claims(ledger)
+    from ..history import asks_past
+    claims = accepted_claims(ledger, past=True)
     scorer = Scorer(claims, model=model, embedder=embedder)
     now = _now()
-    rows, summary = [], {"rows": len(evalset.rows), "claims": len(claims), "scorer": scorer.name,
+    rows, summary = [], {"rows": len(evalset.rows), "claims": sum(not c.get("historical") for c in claims),
+                         "past_values": sum(bool(c.get("historical")) for c in claims), "scorer": scorer.name,
                          "pending": 0, "no_candidates": 0, "already_labelled": 0, "abstain": 0,
-                         "not_scored": 0, "grouped": 0}
+                         "not_scored": 0, "grouped": 0, "past_intent": 0}
     if scorer.why_lexical:
         summary["dense_unavailable"] = scorer.why_lexical
     for row in evalset.rows:
@@ -126,7 +141,10 @@ def propose(set_path, ledger, out, *, model: str | None = DEFAULT_MODEL, top: in
         elif row["expect"].get("groups"):
             summary["grouped"] += 1  # all-of rows: a claim is not one of their groups
         else:
-            candidates = scorer.top(row["question"], top, min_score) if claims else []
+            # A question about the past ("what was X before") is also offered the values
+            # memory held before: picking one anchors it with `follow: edits`.
+            past = asks_past(row["question"])
+            candidates = scorer.top(row["question"], top, min_score, past=past) if claims else []
             if not candidates:
                 summary["no_candidates"] += 1
             else:
@@ -134,6 +152,9 @@ def propose(set_path, ledger, out, *, model: str | None = DEFAULT_MODEL, top: in
                 meta = dict(row.get("meta") or {})
                 meta["claims_label"] = {"state": "pending", "scorer": scorer.name, "proposed_at": now,
                                         "prior_provenance": prior, "candidates": candidates}
+                if past:
+                    meta["claims_label"]["past_intent"] = True
+                    summary["past_intent"] += 1
                 row = {**row, "provenance": {**(prior or {"author": AUTHOR}), "review": "pending"}, "meta": meta}
                 summary["pending"] += 1
         rows.append(row)
@@ -149,9 +170,12 @@ def pending_rows(rows: list[dict]) -> list[int]:
 
 
 def anchor(candidate: dict) -> dict:
+    """The anchor a picked candidate becomes; a past value keeps its value (`follow: edits`)."""
     a = {"text": candidate["text"], "id": candidate["id"]}
     if candidate.get("subject_key"):
         a["subject_key"] = candidate["subject_key"]
+    if candidate.get("historical"):
+        a["follow"] = "edits"
     return a
 
 
@@ -188,9 +212,13 @@ def _show(row: dict, n: int, total: int, say) -> None:
     vault = [s["match"].get("path") for s in row["expect"]["sources"] if s["store"] == "vault"]
     if vault:
         say("vault gold: " + ", ".join(p for p in vault if p))
+    if label.get("past_intent"):
+        say("the question asks about the past: past values are offered too (picked, they stay that value:"
+            " follow=edits)")
     for i, c in enumerate(label["candidates"], 1):
         key = f"  [{c['subject_key']}]" if c.get("subject_key") else ""
-        say(f"  {i}. #{c['id']} ({c['score']:.3f}) {c['text']}{key}")
+        was = f" (past value, until {str(c.get('valid_to') or '?')[:10]})" if c.get("historical") else ""
+        say(f"  {i}. #{c['id']} ({c['score']:.3f}){was} {c['text']}{key}")
 
 
 def _parse(answer: str, n: int) -> tuple[list[int] | None, str | None]:
@@ -245,7 +273,8 @@ def review_claims(set_path, *, ledger=None, by: str = "owner", ask=input, say=pr
                     if resolver is not None:
                         gone = [c["id"] for c in picked if not resolver.resolve(anchor(c))["ids"]]
                         if gone:
-                            say("no longer accepted and current in the ledger: " + ", ".join(f"#{i}" for i in gone))
+                            say("no longer accepted and current (or a past value) in the ledger: "
+                                + ", ".join(f"#{i}" for i in gone))
                             continue
                 new = decide(row, picked, by=by)
                 errors = row_errors(new)

@@ -22,7 +22,8 @@ QUERY_EMBED_WAIT = 5.0
 
 # ---------------------------------------------------------------- what a turn injects
 
-PREFETCH_CLAIMS = 6       # accepted claims per turn
+PREFETCH_CLAIMS = 6       # accepted claims per turn (past values included, `quoth.history`)
+HISTORY_PER_CLAIM = 3     # past values shown under one current claim on a past-intent turn
 PREFETCH_EVIDENCE = 3     # vault hits per turn
 PREFETCH_EPISODES = 2     # excerpts per conversation lane
 VAULT_SNIPPET = 360       # characters of a vault hit: injected, and what the gate and reranker judge
