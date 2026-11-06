@@ -1,34 +1,35 @@
 {
   "counts": {
     "abstain": {
-      "false": 6,
+      "false": 10,
       "true": 0
     },
     "abstain_reason": {},
-    "claims_judged": 6,
+    "claims_judged": 10,
     "groups": 0,
     "kind": {
       "decision": 1,
-      "fact": 3,
+      "fact": 4,
+      "knowledge_update": 3,
       "person": 1,
       "preference": 1
     },
     "lang": {
-      "en": 6
+      "en": 10
     },
     "origin": {
-      "synthetic": 6
+      "synthetic": 10
     },
     "review": {
-      "accepted": 6
+      "accepted": 10
     },
     "split": {
-      "none": 6
+      "none": 10
     }
   },
   "fixture": "eval/public",
   "privacy": "public",
-  "rows": 6,
+  "rows": 10,
   "schema": "quoth-evalset/v2",
-  "sha256": "add984a6b01b1c7f810e56e18df952b7da93e99db334a9e7f62477d95354fc38"
+  "sha256": "da8c92d4b896c0a42e06646aded8f381a6bcae4ebcf2b609e7fd6efef639f4d8"
 }
