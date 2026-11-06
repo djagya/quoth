@@ -75,6 +75,12 @@ report=json.loads(run_out.read_text()); rows=report['set']['rows']
 assert report['status']=='ok' and report['scored']==rows
 assert report['metrics']['overall']['stores']['vault']['hit@10']>=0.8, 'regressed from public fixture baseline'
 output['golden']={'rows':rows,'report':report,'scope':'synthetic public fixture, not real corpus quality'}
+# Claims gold: anchors resolve against the fixture's seeded ledger, none left unresolved.
+cset=eval_path('public')/'claims.jsonl'; invoke('eval','validate',cset)
+claims_out=root/'eval-claims.json'; invoke('eval','run',cset,'--fixture-dir',fx,'--out',claims_out,'--quiet')
+claims=json.loads(claims_out.read_text())
+assert claims['status']=='ok' and claims['scored']==claims['set']['rows'] and claims['claims_gold']['unresolved']=={}
+output['claims_gold']=claims['claims_gold']
 # Box surface from the installed package: plugin skills, WebUI extension, health, nudge.
 from quoth import hermes_install
 from quoth.assets import webui_extension_dir

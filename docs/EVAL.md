@@ -14,6 +14,7 @@ CLI:
 | `quoth eval sweep [NAME=]RECEIPT… [--reference live\|none] [--max-loss 0.01] [--max-lost-hits N]` | replay relevance-gate thresholds on receipts' candidates, against the live gate |
 | `quoth eval online --log DIR [--days N] [--since T] [--until T] [--max-turns N]` | aggregate readout of the sidecar's prefetch log, with the late-tail window report |
 | `quoth eval review QUEUE --out SET [--db SNAPSHOT]` / `--stats` | review the sidecar's captured misses into a private v2 set ([Mining real questions](#mining-real-questions)) |
+| `quoth eval label-claims SET --ledger DB --out NEWSET` / `quoth eval review-claims NEWSET` | propose claims gold for a set's rows from a ledger, and confirm it in a terminal ([Labelling claims gold](#labelling-claims-gold)) |
 
 ```python
 from quoth.evals import load_set, validate, run_set, Receipt, InProcessTarget, compare
@@ -61,6 +62,9 @@ fields: every v1 row is a valid v2 row, v1 manifests still load, and `write_set`
   - `{path}`: a vault-relative note path (vault only);
   - `{locator}`: `path:start-end`, `hermes:<session>:<message>`, or `claim:<id>`;
   - `{claim_text_contains}` or `{subject_key}`: claims only;
+  - `{claim: {text, id?, subject_key?}}`: claims only, a ledger-stable anchor resolved
+    against the target ledger at run time and followed through edits and supersedes
+    ([Claims gold](#claims-gold)); the way to name an expected claim on a ledger that changes;
   - `{text_contains}`: a case-insensitive substring of the candidate's text.
 - `stale` (optional): sources that must not be injected (superseded values of a knowledge
   update).
@@ -71,6 +75,10 @@ fields: every v1 row is a valid v2 row, v1 manifests still load, and `write_set`
 - `negatives` (v2, optional): judged look-alikes that must not be injected (another person
   with the same name, an older version of a note). Unlike `stale`, a leak is reported, not a
   failure of the row.
+- `claims_judged` (v2, optional, answerable rows): the row's claims sources are every claim
+  that answers it, possibly none. Each claim injected on such a row is then known right or
+  wrong, which `stores.claims.judged_precision` measures; rows without it count for claims
+  hit rates only.
 
 v2 row fields, all optional:
 
@@ -80,7 +88,7 @@ v2 row fields, all optional:
 | `cluster` | id of rows that share gold notes, for assigning splits |
 | `hops` | 1–4: notes the answer combines |
 | `abstain_reason` | abstain rows only: `no_memory_needed` (chit-chat, general knowledge, a pure task), `not_in_vault` (plausible but absent), `false_premise` (assumes something the stores contradict or lack), `near_miss` (a look-alike exists and must not be injected) |
-| `provenance` | `{author, created_at, reviewed_by, reviewed_at, review, mined_from}`; `author` is required (`owner`, `assistant`, `llm:<model>`, `script:<name>`). `review` is `accepted` (default), `edited`, `draft` or `rejected`: drafts and rejected rows stay in the file for review and are not scored. |
+| `provenance` | `{author, created_at, reviewed_by, reviewed_at, review, mined_from}`; `author` is required (`owner`, `assistant`, `llm:<model>`, `script:<name>`). `review` is `accepted` (default), `edited`, `draft`, `rejected` or `pending` (a machine proposal waiting for the owner, as `eval label-claims` writes): drafts, pending and rejected rows stay in the file for review and are not scored. |
 | `paraphrase_of` | another row of the set with the same information need |
 
 ### Manifest
@@ -92,7 +100,8 @@ v2 row fields, all optional:
  "fixture": "eval/public", "source": {"format": "golden-v1", "sha256": "<of the converted input>"}}
 ```
 
-A v1 manifest has only the first four counts. `fixture` names the store set the rows target;
+A v1 manifest has only the first four counts; `counts.claims_judged` appears only when a row
+sets `claims_judged`. `fixture` names the store set the rows target;
 `any` marks a set that runs on any stores (the shipped no-memory set). Converters and `write_set` write the
 manifest; a private set and its manifest are written with mode 0600.
 
@@ -164,6 +173,45 @@ makes the row stale and removes it from vault scoring, and past the bound the ru
 `status: gold_drift_excessive` (exit 3). `context` and `asked_at` are recorded but not used
 yet (`config.context: "ignored"`).
 
+### Claims gold
+
+Claim ids belong to one ledger, and an owner's edit or a supersede makes a new claim, so a
+row names an expected claim by an anchor instead:
+
+```json
+{"store": "claims", "match": {"claim": {"text": "Prefers oolong tea without sugar.", "id": 12,
+                                        "subject_key": "pref.tea"}}}
+```
+
+`text` (required) is the claim's full text when it was labelled; `id` (its id in the ledger
+it was labelled on) and `subject_key` are optional. At the start of a run each anchor is
+resolved against the target ledger:
+
+1. **The labelled claim**: the claim `id` when its text still equals `text` (case, spacing
+   and final punctuation aside), else every claim with that text (nothing is deleted from a
+   ledger, so an edited or superseded claim is still there), else the one accepted current
+   claim of `subject_key`.
+2. **Followed forward** through `superseded_by`, by edits and supersedes, to the claim that
+   holds the slot now. It must be accepted and current; the anchor then matches
+   `claim:<id>` for this run. A `stale` anchor is not followed: the stale value is that exact
+   claim.
+3. **Otherwise unresolved**, with a reason: `not_found`, `ambiguous` (it leads to several
+   current claims), `pending`, `rejected`, `expired`, `forgotten`, or `no_ledger`.
+
+Unresolved gold is taken out of the row and reported apart, never counted as a miss. A row
+left with no expected source is not scored (`rows_excluded`); a row that keeps other sources
+is scored on them and loses `claims_judged` (`rows_partial`). The receipt's `claims_gold`
+holds counts and row ids only: anchors and how many resolved, `by` (`id`, `text`,
+`subject_key`), `followed` (`edit`, `supersede` steps), `unresolved` by reason, and `stale`
+anchors found. An in-process run uses its own ledger; a `--socket` run resolves against
+`--ledger DB` opened read-only (without it every anchor is `no_ledger`). The nightly suite
+gate scores with an empty ledger: its anchors resolve `not_found`, so claims-only rows are
+left out and the others are scored on their vault gold.
+
+Gold that a supersede carried forward is the claim that holds the slot now. When the owner
+labelled a value that has since changed (a city, a server name), the row then expects the
+new value; `followed.supersede` shows how many anchors moved that way.
+
 ### Metrics
 
 All aggregate: overall and by `kind`, `origin` and `lang` (and by `split`, `abstain_reason`
@@ -190,6 +238,7 @@ about ±8 points wide, which is what the set can tell apart.
 | `explicit.changed_hits` | explicit hits marked `changed` since indexing (with `--vault`) |
 | `groups.all@k` (k 5, 10), `groups.group_recall@10`, `groups.injected_all_rate` | all-of rows: every group's first vault hit within k; share of groups found in the top 10; every group in the injected block |
 | `negative_leak_rate` | rows with judged negatives where one was injected (lower is better) |
+| `stores.claims.judged_n`, `judged_precision`, `judged_items_mean` | rows with `claims_judged`: how many; the mean share of right claims among those injected, over judged rows with a claim injected (null when none was); claims injected per judged row |
 
 `stores.vault.hit@5`, `hit@10`, `mrr` and `recall@10` are the nightly gate's metrics: the
 gate scores with the same candidates and matching.
@@ -203,7 +252,9 @@ gate scores with the same candidates and matching.
  "set": {"schema", "sha256", "rows", "privacy", "fixture"},
  "config": {"mode", "model", "evidence_budget", "retrieval", "stores", "prefetch", "min_score", "gate", "k_candidates",
             "gold_drift", "rerank": {"model", "repo", "revision", "budget", "claims", "max_tokens"}},
- "status": "ok|gold_drift_excessive", "gold_drift": {"renamed", "stale", "ids"}, "scored": 29,
+ "status": "ok|gold_drift_excessive", "gold_drift": {"renamed", "stale", "ids"},
+ "claims_gold": {"anchors", "resolved", "by", "followed", "unresolved", "rows_excluded", "rows_partial", "ledger",
+                 "stale"}, "scored": 29,
  "metrics": {"overall", "by_kind", "by_origin", "by_lang"}, "explicit": {"calls", "rows", "hit@1", "hit@3",
              "hit@5", "hit@10", "recall@10", "repeat_rate", "changed_hits"},
  "latency_ms": {}, "statuses": {},
@@ -586,7 +637,11 @@ Synthetic text only:
 - `telegram.jsonl`: Hermes messages; `eval fixture` writes them into a Hermes-shaped
   `state.db` and ingests both lanes (a scheduled-run row and a too-short reply are dropped);
 - `set.jsonl` and its manifest: 29 rows covering every kind, including follow-ups with
-  `context`, knowledge updates with `stale`, unanswerables and lane rows.
+  `context`, knowledge updates with `stale`, unanswerables and lane rows;
+- `claims.jsonl` and its manifest: 6 claims-gold rows on the seed, all `claims_judged`: an
+  anchor found by id, one by text under a foreign id, one by `subject_key` after a rewording,
+  two followed past a supersede, a stale anchor, and two vault rows where no claim is right
+  (so CI covers resolution and judged precision). The `public` suite runs it as `claims`.
 
 ```sh
 uv run quoth eval fixture --out /tmp/quoth-fixture      # hash-ngram, no model files
@@ -828,6 +883,51 @@ set is refused) and the candidate leaves the queue:
 
 `quoth eval review DIR --stats` prints counts only (pending, by signal, merged repeats, oldest
 and newest): no question, query or path.
+
+## Labelling claims gold
+
+Prefetch injects accepted claims next to the vault hits, but a set says whether they are
+right only where its rows name the expected claims. To add them to an existing set, a helper
+proposes candidates and the owner confirms each one; nothing is ever confirmed by itself.
+
+**Propose.** `quoth eval label-claims SET --ledger LEDGER --out NEWSET [--model bge-m3 |
+--lexical] [--top 5] [--min-score X]` reads the ledger's accepted current claims (opened
+read-only) and scores each against every answerable, scored row that has no claims gold yet:
+cosine with a local embedding model when one loads (`--model`, default `bge-m3`, local files
+only), else the relevance gate's word coverage (`--lexical`, or when the model is not
+installed: `dense_unavailable` in the summary). Rows with candidates are written to NEWSET as
+`provenance.review: pending`, so they are not scored, with the proposal in `meta`:
+
+```json
+{"provenance": {"author": "owner", "review": "pending"},
+ "meta": {"claims_label": {"state": "pending", "scorer": "dense:bge-m3", "proposed_at": "…",
+                           "prior_provenance": {"author": "owner", "review": "accepted"},
+                           "candidates": [{"id": 12, "text": "…", "subject_key": "…", "score": 0.61,
+                                           "lexical": 0.5}]}}}
+```
+
+Every other row is copied unchanged (abstain, draft, rejected and all-of rows, rows that
+already have claims gold or `claims_judged`, rows with no candidate). NEWSET is a new file
+(the input is never overwritten), `private` with mode 0600 (`--privacy public` only from a
+public set), and the command prints counts only. Run it on the machine that holds the
+ledger: no text leaves it.
+
+**Confirm.** `quoth eval review-claims NEWSET [--ledger LEDGER]` walks the pending rows in a
+terminal like `eval review`: the question, the row's vault gold and the numbered candidates
+with their scores.
+
+| Answer | Effect |
+|---|---|
+| `1` or `1,3` | these claims are right: added as anchors (`{text, id, subject_key}`) with `claims_judged: true` |
+| `n` | no candidate is right: `claims_judged: true` with no claims gold, so any claim injected there counts as wrong |
+| `d` | dismiss: the row goes back unjudged |
+| `s` / `q` | skip (stays pending) / quit |
+
+Each decision restores the row's own provenance (so it is scored again), records
+`meta.claims_label: {state: confirmed|dismissed, scorer, proposed, chosen, by, at}` without
+the candidates' text, and rewrites NEWSET at once. With `--ledger`, a picked claim must still
+be accepted and current there. Once no row is pending, NEWSET is the set to run; its claims
+gold keeps resolving as the ledger changes ([Claims gold](#claims-gold)).
 
 ## The nightly gate and daily quality
 
