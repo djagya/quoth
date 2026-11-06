@@ -140,10 +140,12 @@ REVIEW_SCHEMA = {
             "evidence_locator": {"type": "string", "maxLength": MAX_LOCATOR_CHARS,
                                  "description": "Vault path:lines that already says it (covered)."},
             "bucket": {"type": "string",
-                       "enum": ["accept", "keep", "none", "duplicate", "covered", "stale", "reject"],
+                       "enum": ["accept", "keep", "none", "duplicate", "covered", "stale", "reject",
+                                "dropped_copies"],
                        "description": (
-                           "A suggestion group. digest takes any of these; apply takes only the junk "
-                           "buckets duplicate, covered, stale or reject (with bucket_stamp).")},
+                           "A suggestion group, or dropped_copies (copies of memories the owner already "
+                           "dropped). digest takes any of these; apply takes only the junk buckets "
+                           "duplicate, covered, stale, reject or dropped_copies (with bucket_stamp).")},
             "bucket_stamp": {"type": "string", "description": "From digest buckets; apply bucket only."},
             "suggested": {"type": "boolean"},
             "offset": {"type": "integer", "minimum": 0},

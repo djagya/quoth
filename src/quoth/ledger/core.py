@@ -320,13 +320,17 @@ def reject(conn, claim_id: int, actor: str = "owner", note: str | None = None, n
     """
     now = now or _now()
     with _tx(conn):
-        _pending(conn, claim_id)
-        conn.execute("UPDATE claims SET review_status = 'rejected', reviewed_at = ?, review_note = ?"
-                     " WHERE id = ?", (now, note, claim_id))
-        _event(conn, claim_id, "rejected", actor, now, **_batch(batch),
-               **({"duplicate_of": duplicate_of} if duplicate_of is not None else {}))
-        family = _drop_family(conn, claim_id, actor, now, note, batch)
+        family = _reject(conn, claim_id, actor, now, note, batch, duplicate_of)
     return {**get(conn, claim_id), "family": family}
+
+
+def _reject(conn, claim_id, actor, now, note, batch, duplicate_of) -> dict:
+    _pending(conn, claim_id)
+    conn.execute("UPDATE claims SET review_status = 'rejected', reviewed_at = ?, review_note = ?"
+                 " WHERE id = ?", (now, note, claim_id))
+    _event(conn, claim_id, "rejected", actor, now, **_batch(batch),
+           **({"duplicate_of": duplicate_of} if duplicate_of is not None else {}))
+    return _drop_family(conn, claim_id, actor, now, note, batch)
 
 
 # Events that record no decision: presort suggestions and re-proposals of the same text.
@@ -334,15 +338,21 @@ _NO_DECISION = ("suggested", "re_proposed")
 
 
 def _last_decision(conn, claim_id) -> tuple[str | None, dict]:
-    row = conn.execute(f"SELECT action, detail FROM ledger_events WHERE claim_id = ?"
+    _, action, detail = _last_decision_event(conn, claim_id)
+    return action, detail
+
+
+def _last_decision_event(conn, claim_id) -> tuple[int | None, str | None, dict]:
+    """(event id, action, decoded detail) of the claim's latest decision event."""
+    row = conn.execute(f"SELECT id, action, detail FROM ledger_events WHERE claim_id = ?"
                        f" AND action NOT IN {_NO_DECISION} ORDER BY id DESC LIMIT 1", (claim_id,)).fetchone()
     if row is None:
-        return None, {}
+        return None, None, {}
     try:
-        detail = json.loads(row[1]) if row[1] else {}
+        detail = json.loads(row[2]) if row[2] else {}
     except ValueError:
         detail = {}
-    return row[0], detail if isinstance(detail, dict) else {}
+    return row[0], row[1], detail if isinstance(detail, dict) else {}
 
 
 def duplicate_family(conn, root: int) -> dict:
@@ -406,6 +416,77 @@ def family_rejects(conn, claim_ids: Iterable[int]) -> set[int]:
     """Ids that rejecting `claim_ids` would reject as well (their families' restored copies)."""
     ids = set(claim_ids)
     return {cid for root in ids for cid, _ in duplicate_family(conn, root)["to_reject"]} - ids
+
+
+def _copy_of_dropped(conn, claim_id) -> tuple[int, int] | None:
+    """(original id, restore event id) when `claim_id` is a copy left behind by an owner's drop.
+
+    Releases before 0.18.1 restored an original's confirmed copies when the owner rejected the
+    original. Such a copy is pending (not superseded), its latest decision is `restored` with
+    `target_dropped` = X, and X's latest decision is the owner's `rejected`. Expiry by age and
+    latest-wins write `expired_age` / `expired_latest_wins` for X, so their restores never
+    match; nor does a copy the owner decided again after the restore, or an X whose drop was
+    undone.
+    """
+    row = conn.execute("SELECT review_status, superseded_by FROM claims WHERE id = ?", (claim_id,)).fetchone()
+    if row is None or row["review_status"] != "pending" or row["superseded_by"] is not None:
+        return None
+    event, action, detail = _last_decision_event(conn, claim_id)
+    target = detail.get("target_dropped")
+    if action != "restored" or not isinstance(target, int) or target == claim_id:
+        return None
+    original = conn.execute("SELECT review_status FROM claims WHERE id = ?", (target,)).fetchone()
+    if original is None or original["review_status"] != "rejected" \
+            or _last_decision(conn, target)[0] != "rejected":
+        return None
+    return target, event
+
+
+def dropped_copies(conn) -> list[dict]:
+    """Pending copies of originals the owner dropped (see `_copy_of_dropped`), oldest first.
+
+    Each is {id, copy_of, event}: `copy_of` is the dropped original, `event` the restore that
+    brought the copy back. Read-only; the `dropped_copies` junk bucket clears them.
+    """
+    out = []
+    for (cid,) in conn.execute(
+            "SELECT c.id FROM claims c WHERE c.review_status = 'pending' AND c.superseded_by IS NULL"
+            " AND EXISTS (SELECT 1 FROM ledger_events e WHERE e.claim_id = c.id AND e.action = 'restored'"
+            " AND json_extract(e.detail, '$.target_dropped') IS NOT NULL)"
+            " ORDER BY c.recorded_at, c.id").fetchall():
+        hit = _copy_of_dropped(conn, cid)
+        if hit is not None:
+            out.append({"id": cid, "copy_of": hit[0], "event": hit[1]})
+    return out
+
+
+def clear_dropped_copies(conn, claim_ids: Iterable[int], *, actor: str = "owner", note: str | None = None,
+                         now: str | None = None, batch: str | None = None) -> list[dict]:
+    """Reject each copy of a dropped original as its duplicate (one transaction per claim).
+
+    The owner confirmed the copy as the same fact when they first dropped it as a duplicate,
+    and later dropped the original: this finishes that drop. Each rejection is `rejected` with
+    `duplicate_of` = the original and `batch`, so `undo_batch` returns the lot to pending. A
+    claim that is no longer such a copy is refused (`not_a_dropped_copy`) and left alone.
+    """
+    now = now or _now()
+    results = []
+    for claim_id in claim_ids:
+        try:
+            with _tx(conn):
+                hit = _copy_of_dropped(conn, claim_id)
+                if hit is None:
+                    raise LedgerRejected("not_a_dropped_copy")
+                why = f"duplicate of #{hit[0]}, which the owner dropped"
+                family = _reject(conn, claim_id, actor, now, why + (f"; {note}" if note else ""),
+                                 batch, hit[0])
+            out = get(conn, claim_id)
+            results.append({"id": claim_id, "applied": "dropped_copies", "duplicate_of": hit[0],
+                            "result_id": claim_id, "review_status": out["review_status"],
+                            "text": _short(out["text"]), "family": family})
+        except LedgerRejected as exc:
+            results.append({"id": claim_id, "error": exc.code})
+    return results
 
 
 def _restore_duplicates_of(conn, target: int, actor, now, batch) -> list[int]:
@@ -525,8 +606,12 @@ def expire_pending(conn, max_age_days: float = 30, actor: str = "expiry", now: s
 
 SUGGEST_ACTIONS = ("accept", "reject", "duplicate", "stale", "keep", "covered")
 # Buckets the owner may clear in one step (`bucket_state` + `apply_suggestions`); none adds memory.
+# `dropped_copies` holds copies of originals the owner dropped (`dropped_copies`, cleared by
+# `clear_dropped_copies`), whatever their suggestion; the other buckets leave those out.
 # BUCKET_CAP bounds what one approving message may decide, bucket or ids.
-JUNK_BUCKETS = ("duplicate", "covered", "stale", "reject")
+SUGGESTION_BUCKETS = ("duplicate", "covered", "stale", "reject")
+DROPPED_COPIES = "dropped_copies"
+JUNK_BUCKETS = SUGGESTION_BUCKETS + (DROPPED_COPIES,)
 MAX_TOPIC_CHARS = 40
 MAX_LOCATOR_CHARS = 300
 BUCKET_CAP = 200
@@ -641,19 +726,26 @@ def apply_suggestions(conn, claim_ids: Iterable[int], *, actor: str = "owner", n
     return results
 
 
-def bucket_state(conn, bucket: str) -> tuple[list[int], str]:
-    """(oldest-first ids of pending claims whose current suggestion is `bucket`, stamp).
+def bucket_state(conn, bucket: str, copies: list[dict] | None = None) -> tuple[list[int], str]:
+    """(oldest-first ids of the pending claims in junk bucket `bucket`, stamp).
 
-    The stamp hashes the sorted (claim id, suggestion id) pairs, so it changes whenever a
-    claim enters or leaves the bucket or is re-sorted: an approval for what the owner saw cannot
-    widen to more.
+    A suggestion bucket holds the claims whose current suggestion is `bucket`, except copies of
+    dropped originals; `dropped_copies` holds those copies (`copies`: a `dropped_copies` result
+    already in hand). The stamp hashes the sorted (claim id, suggestion id) pairs, or (claim id,
+    restore event id) for `dropped_copies`, so it changes whenever a claim enters or leaves the
+    bucket or is re-sorted: an approval for what the owner saw cannot widen to more.
     """
     if bucket not in JUNK_BUCKETS:
         raise LedgerRejected("unknown_bucket")
-    rows = conn.execute(
-        "SELECT c.id, s.id FROM claims c JOIN claim_suggestions s ON s.claim_id = c.id AND s.replaced_by IS NULL"
-        " WHERE c.review_status = 'pending' AND c.superseded_by IS NULL AND s.action = ?"
-        " ORDER BY c.recorded_at, c.id", (bucket,)).fetchall()
+    copies = dropped_copies(conn) if copies is None else copies
+    if bucket == DROPPED_COPIES:
+        rows = [(c["id"], c["event"]) for c in copies]
+    else:
+        skip = {c["id"] for c in copies}
+        rows = [tuple(r) for r in conn.execute(
+            "SELECT c.id, s.id FROM claims c JOIN claim_suggestions s ON s.claim_id = c.id"
+            " AND s.replaced_by IS NULL WHERE c.review_status = 'pending' AND c.superseded_by IS NULL"
+            " AND s.action = ? ORDER BY c.recorded_at, c.id", (bucket,)) if r[0] not in skip]
     pairs = json.dumps(sorted([r[0], r[1]] for r in rows))
     return [r[0] for r in rows], hashlib.sha256(pairs.encode()).hexdigest()[:16]
 
@@ -789,6 +881,8 @@ def digest(conn, *, topic: str | None = None, bucket: str | None = None,
     chat message; `text` is the suggested rewrite when there is one.
     """
     rows = _pending_with_tips(conn)
+    copies = dropped_copies(conn)
+    copy_of = {c["id"]: c["copy_of"] for c in copies}
     by_suggestion: dict[str, int] = {}
     topics: dict[str, dict] = {}
     for r in rows:
@@ -796,15 +890,21 @@ def digest(conn, *, topic: str | None = None, bucket: str | None = None,
         t = topics.setdefault(r["topic"], {"topic": r["topic"], "total": 0, "to_read": 0,
                                            "by_suggestion": {}})
         t["total"] += 1
-        t["to_read"] += r["action"] in TO_READ
+        t["to_read"] += r["action"] in TO_READ and r["id"] not in copy_of
         t["by_suggestion"][r["action"]] = t["by_suggestion"].get(r["action"], 0) + 1
     ordered = sorted(topics.values(), key=lambda t: (t["topic"] == OTHER_TOPIC, t["topic"].casefold()))
-    cleanup = sum(by_suggestion.get(b, 0) for b in JUNK_BUCKETS)
+    buckets = {}  # what a bucket apply must name: count and stamp as the owner saw them
+    for b in JUNK_BUCKETS:
+        ids, stamp = bucket_state(conn, b, copies)
+        buckets[b] = {"count": len(ids), "stamp": stamp}
+    cleanup = sum(b["count"] for b in buckets.values())
     if topic is not None:
         name = next((t["topic"] for t in ordered if t["topic"].casefold() == topic.strip().casefold()), None)
         if name is None:
             raise LedgerRejected("unknown_topic")
         group, members = {"topic": name}, [r for r in rows if r["topic"] == name]
+    elif bucket == DROPPED_COPIES:
+        group, members = {"bucket": bucket}, [r for r in rows if r["id"] in copy_of]
     elif bucket is not None:
         if bucket not in ITEM_ORDER:
             raise LedgerRejected("unknown_bucket")
@@ -813,7 +913,8 @@ def digest(conn, *, topic: str | None = None, bucket: str | None = None,
         first = next((t for t in ordered if t["to_read"]), ordered[0] if ordered else None)
         group = {"topic": first["topic"]} if first else {}
         members = [r for r in rows if first and r["topic"] == first["topic"]]
-    members.sort(key=lambda r: ITEM_ORDER.index(r["action"]))  # stable: oldest first per action
+    if bucket != DROPPED_COPIES:
+        members.sort(key=lambda r: ITEM_ORDER.index(r["action"]))  # stable: oldest first per action
     by_id = {r["id"]: r for r in rows}
     items = []
     for n, r in enumerate(members[:max(1, min(int(limit), MAX_GROUP_ITEMS))], 1):
@@ -831,12 +932,12 @@ def digest(conn, *, topic: str | None = None, bucket: str | None = None,
                         duplicate_of_text=kept_text or None)
         if r["action"] == "covered":
             item["evidence_locator"] = r["evidence_locator"]
+        if r["id"] in copy_of:
+            # A copy of a memory the owner already dropped: the dropped original's id and text.
+            original = get(conn, copy_of[r["id"]])
+            item.update(copy_of=copy_of[r["id"]], copy_of_text=original["text"] if original else None)
         items.append(item)
     to_read = len(rows) - cleanup
-    buckets = {}  # what a bucket apply must name: count and stamp as the owner saw them
-    for b in JUNK_BUCKETS:
-        ids, stamp = bucket_state(conn, b)
-        buckets[b] = {"count": len(ids), "stamp": stamp}
     return {"pending": len(rows), "by_suggestion": dict(sorted(by_suggestion.items())), "topics": ordered,
             "buckets": buckets,
             "plan": {"cleanup": cleanup, "to_read": to_read, "unsorted": by_suggestion.get("none", 0),
@@ -946,8 +1047,14 @@ def mark_claims_used(conn, claim_ids: list[int], now: str | None = None) -> None
 
 
 def health(conn, *, max_pending: int = 40, max_pending_age_days: float = 14,
-           now: str | None = None) -> dict:
-    """Queue size/age plus 7-day churn; red when the review queue is too large or too old."""
+           now: str | None = None, core_dir: str | Path | None = None,
+           core_budget: int | None = None) -> dict:
+    """Queue size/age plus 7-day churn; red when the review queue is too large or too old.
+
+    `dropped_copies` counts the copies of dropped originals still pending (the junk bucket of
+    that name). With `core_dir`, `core` says whether the published core still matches the
+    ledger (`compile.core_freshness`); red `core_stale` or `core_unpublished` when it does not.
+    """
     now = now or _now()
     week = _fmt(_parse(now) - timedelta(days=7))
     pending = conn.execute("SELECT kind, recorded_at FROM claims WHERE review_status = 'pending'"
@@ -964,10 +1071,16 @@ def health(conn, *, max_pending: int = 40, max_pending_age_days: float = 14,
     by_kind: dict[str, int] = {}
     for r in pending:
         by_kind[r[0]] = by_kind.get(r[0], 0) + 1
+    extra = {}
+    if core_dir is not None:
+        from .compile import core_freshness
+        extra["core"] = core_freshness(conn, core_dir, core_budget)
+        if extra["core"]["status"] == "red":
+            reasons.append(extra["core"]["reason"])
     return {
         "schema": SCHEMA, "checked_at": now, "status": "red" if reasons else "green",
         "reasons": reasons, "pending": len(pending), "pending_by_kind": dict(sorted(by_kind.items())),
-        "oldest_pending_age_days": oldest_days,
+        "oldest_pending_age_days": oldest_days, "dropped_copies": len(dropped_copies(conn)), **extra,
         "accepted_current": conn.execute(
             f"SELECT count(*) FROM claims WHERE review_status = 'accepted' AND {_CURRENT}").fetchone()[0],
         "last_7d": {name: events.get(action, 0) for name, action in (

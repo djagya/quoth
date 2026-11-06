@@ -72,6 +72,48 @@ def published_core(core_dir: str | Path | None) -> dict | None:
     return {"source": "published", "file": target.name, "text": target.read_text(encoding="utf-8")}
 
 
+def core_freshness(conn, core_dir: str | Path, budget_chars: int | None = None,
+                   headroom: float = 0.2) -> dict:
+    """Whether the published core (`core.json` in `core_dir`) still matches the ledger.
+
+    Compiles in memory (writes nothing) at `budget_chars` (default: the published manifest's
+    budget, else 4000) and compares claim ids: `missing` counts claims the core would carry
+    now that the published core neither carries nor left out for budget (an accept or edit
+    since), `extra` the claims it carries that are no longer accepted and current (a reject by
+    undo, a forget, an edit). A different order or a budget swap among claims that both sides
+    know is not staleness: injected claims gain `use_count`, which reorders the core and
+    changes its sha256 without any review. Counts only, never claim text.
+
+    `status` is red with `reason` `core_stale` when either count is above 0, `core_unpublished`
+    when nothing is published while the core would carry claims, `core_unreadable` when
+    `core.json` cannot be read.
+    """
+    manifest_path = Path(core_dir) / "core.json"
+    out = {"status": "green", "reason": None, "published_sha": None, "missing": 0, "extra": 0,
+           "compiled_at": None}
+    manifest = None
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            published_ids = {int(i) for i in manifest["claim_ids"]}
+            published_dropped = {int(i) for i in manifest.get("dropped_ids") or ()}
+        except (OSError, ValueError, KeyError, TypeError):
+            return {**out, "status": "red", "reason": "core_unreadable"}
+    budget = budget_chars or (manifest or {}).get("budget") or 4000
+    compiled = compile_core(conn, int(budget), headroom)
+    now_ids, now_dropped = set(compiled["claim_ids"]), set(compiled["dropped_ids"])
+    if manifest is None:
+        if now_ids or now_dropped:
+            return {**out, "status": "red", "reason": "core_unpublished", "missing": len(now_ids)}
+        return out
+    out.update(published_sha=manifest.get("sha256"), compiled_at=manifest.get("compiled_at"),
+               missing=len(now_ids - published_ids - published_dropped),
+               extra=len(published_ids - now_ids - now_dropped))
+    if out["missing"] or out["extra"]:
+        out.update(status="red", reason="core_stale")
+    return out
+
+
 def _symlink(target: Path, link: Path) -> None:
     temporary = link.with_name("." + link.name + "." + uuid.uuid4().hex)
     try:
