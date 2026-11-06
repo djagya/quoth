@@ -109,6 +109,8 @@ def record(row: dict, candidates: dict, sources: list, timings: dict | None = No
     # it: a replay then skips that rule).
     out = {"abstain": bool(row["expect"]["abstain"]), "answerable": bool(sources),
            "has_stale": bool(stale), "terms": len(query_terms), "stores": stores}
+    if row["expect"].get("claims_judged") and not row["expect"]["abstain"]:
+        out["claims_judged"] = True  # judged claims gold: precision of injected claims is known
     dense = [(timings or {}).get(k) for k in ("vault", "claims_dense")]
     if dense[0] is not None and any("rerank" in it for it in stores["vault"]["items"]):
         # The row's evidence search time: live scoring also ends at the evidence deadline.
@@ -163,7 +165,8 @@ def observe(row_id: str, rec: dict, gate: relevance.Gate) -> dict:
     block = [it for store in M.BLOCK_ORDER for it in injected_items[store]]
     block_rank = next((i for i, it in enumerate(block, 1) if it.get("match")), None)
     return {"id": row_id, "abstain": rec["abstain"], "answerable": rec["answerable"],
-            "has_stale": rec["has_stale"], "stores": stores, "block": len(block), "block_rank": block_rank}
+            "has_stale": rec["has_stale"], "claims_judged": bool(rec.get("claims_judged")), "stores": stores,
+            "block": len(block), "block_rank": block_rank}
 
 
 def _unscored(items: list[dict], keep) -> list[dict]:
@@ -242,6 +245,7 @@ def _summary(obs: list[dict], times: list, gate: relevance.Gate, budget_ms: floa
            "claims_hit@5": claims.get("hit@5"), "claims_recall@10": claims.get("recall@10"),
            "vault_injected_hit_rate": vault.get("injected_hit_rate"),
            "claims_injected_hit_rate": claims.get("injected_hit_rate"),
+           "claims_judged_precision": claims.get("judged_precision"),
            "injected_hit_rate": b["injected_hit_rate"], "injected_mrr": b["injected_mrr"],
            "injected_precision": b["injected_precision"], "abstain_nonempty_rate": b["abstain_nonempty_rate"],
            "empty_rate": b["empty_rate"], "stale_leak": b["stale_leak"],

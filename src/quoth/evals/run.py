@@ -17,13 +17,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import sqlite3
 import time
 
 from .. import __version__
 from .. import recall_defaults as D
+from . import claims_gold as CG
 from . import metrics as M
 from . import sweep as SW
-from .format import EvalSet, vault_paths
+from .format import EvalSet, claim_anchors, vault_paths
 
 RECEIPT_SCHEMA = "quoth-eval-run/v1"
 DEFAULT_K_CANDIDATES = 10
@@ -110,6 +112,7 @@ class InProcessTarget:
                                 owner_prefetch=owner_prefetch, gate=gate, reranker=reranker, **kwargs)
         target = cls(app)
         target.db = db
+        target.ledger = ledger
         return target
 
     def prepare(self) -> None:
@@ -161,6 +164,7 @@ class SocketTarget:
         self.timeout = max(timeout, (evidence_budget or 0) + 15.0)
         self.mode = "socket"
         self.db = None
+        self.ledger = None  # read-only, only to resolve claims gold (`eval run --ledger`)
 
     def _post(self, route: str, body: dict | None, *, allow_unhealthy: bool = False) -> dict:
         import http.client
@@ -269,6 +273,24 @@ def _resolved_groups(row: dict, resolved: dict | None) -> list | None:
     return [{"name": g["name"], "any_of": [_rewrite(s, mapping) for s in g["any_of"]]} for g in groups]
 
 
+# ---------------------------------------------------------------- claims gold
+
+def claims_resolver(target) -> "CG.Resolver":
+    """A resolver over the target's ledger: the in-process sidecar's own connection (under
+    its lock), else a read-only open of `target.ledger` (a socket run's `--ledger`), else
+    none (every anchor is then `no_ledger`)."""
+    app = getattr(target, "app", None)
+    if app is not None and getattr(app, "conn", None) is not None:
+        return CG.Resolver(app.conn, lock=getattr(app, "lock", None))
+    path = getattr(target, "ledger", None)
+    if path:
+        try:
+            return CG.Resolver.open(path)
+        except (OSError, sqlite3.Error) as exc:
+            raise RunError(f"cannot open the ledger for claims gold: {type(exc).__name__}") from exc
+    return CG.Resolver(None)
+
+
 # ---------------------------------------------------------------- run
 
 def _guard_no_text(receipt: dict, evalset: EvalSet) -> None:
@@ -279,6 +301,9 @@ def _guard_no_text(receipt: dict, evalset: EvalSet) -> None:
                      if s["store"] == "vault" and "path" in s["match"]]
         needles = [row["question"], *vault_paths(row), *negatives, row["expect"].get("answer_hint") or ""]
         needles += [t["text"] for t in row.get("context", [])]
+        needles += [a["text"] for a in claim_anchors(row)]
+        needles += [s["match"]["claim_text_contains"] for key in ("sources", "stale", "negatives")
+                    for s in row["expect"].get(key) or [] if "claim_text_contains" in s["match"]]
         for needle in needles:
             if needle and len(needle) >= 6 and needle in blob:
                 raise RunError(f"{row['id']}: receipt would contain row content; refusing")
@@ -351,6 +376,13 @@ def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATE
             drift = report_only(report)
         except ExcessiveDrift as exc:
             drift, status = report_only(exc.report), "gold_drift_excessive"
+    claims_rows, claims_report = {}, None
+    if CG.has_anchors(evalset.rows):
+        resolver = claims_resolver(target)
+        try:
+            claims_rows, claims_report = CG.resolve_rows(evalset.rows, resolver)
+        finally:
+            resolver.close()
     observations, timings, statuses, rows_detail, recorded = [], [], {}, [], {}
     explicit_obs = []
     config = target.config()
@@ -361,6 +393,10 @@ def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATE
                 "max_hits_per_note": D.MAX_HITS_PER_NOTE}
     if status == "ok":
         for row in evalset.rows:
+            if row["id"] in claims_rows:
+                row = claims_rows[row["id"]]
+                if row is None:  # every expected source is unresolved claims gold: not scored
+                    continue
             sources = _resolved_sources(row, resolved)
             t0 = time.monotonic()
             # A reranking sidecar scores every candidate (`k_rerank`) so a sweep can widen.
@@ -415,6 +451,7 @@ def run_set(evalset: EvalSet, target, *, k_candidates: int = DEFAULT_K_CANDIDATE
                    "context": "ignored", "asked_at": "ignored"},
         "status": status,
         "gold_drift": drift,
+        "claims_gold": claims_report,
         "scored": len(observations),
         "metrics": M.aggregate(observations) if observations else None,
         "explicit": explicit_metrics(explicit_obs),

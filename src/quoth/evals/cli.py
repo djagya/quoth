@@ -58,6 +58,7 @@ def _target(a):
                            " (see /v1/health)")
         target = SocketTarget(a.socket, evidence_budget=30.0 if a.evidence_budget is None else a.evidence_budget)
         target.db = a.db  # read-only, only for --gold-drift against the served snapshot
+        target.ledger = a.ledger  # read-only, only to resolve claims gold against the served ledger
         return target
     if a.fixture_dir:
         d = Path(a.fixture_dir)
@@ -184,7 +185,7 @@ def _target_arguments(pr) -> None:
     pr.add_argument("--socket", help="live sidecar socket instead of an in-process build")
     pr.add_argument("--fixture-dir", help="directory built by `eval fixture` (fills the store paths)")
     pr.add_argument("--db", help="serving snapshot or pointer (omit: no vault store)")
-    pr.add_argument("--ledger")
+    pr.add_argument("--ledger", help="ledger DB; with --socket, read-only to resolve claims gold (docs/EVAL.md#claims-gold)")
     pr.add_argument("--state-db")
     pr.add_argument("--episodes", help="assistant lane DB (what the assistant said)")
     pr.add_argument("--owner-episodes", help="owner lane DB (what the owner wrote)")

@@ -143,6 +143,14 @@ def _headline(receipt: dict) -> dict:
            "abstain_nonempty_rate": overall.get("abstain_nonempty_rate"), "ci95": metrics.get("ci95")}
     if overall.get("groups"):
         out["groups.all@10"] = overall["groups"].get("all@10")
+    claims = (overall.get("stores") or {}).get("claims") or {}
+    if claims.get("n"):
+        out["claims.hit@5"] = claims.get("hit@5")
+        out["claims.injected_hit_rate"] = claims.get("injected_hit_rate")
+    if claims.get("judged_n"):
+        out["claims.judged_precision"] = claims.get("judged_precision")
+    if receipt.get("claims_gold"):
+        out["claims_gold.unresolved"] = sum(receipt["claims_gold"]["unresolved"].values())
     return out
 
 
