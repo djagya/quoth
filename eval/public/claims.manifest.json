@@ -1,0 +1,34 @@
+{
+  "counts": {
+    "abstain": {
+      "false": 6,
+      "true": 0
+    },
+    "abstain_reason": {},
+    "claims_judged": 6,
+    "groups": 0,
+    "kind": {
+      "decision": 1,
+      "fact": 3,
+      "person": 1,
+      "preference": 1
+    },
+    "lang": {
+      "en": 6
+    },
+    "origin": {
+      "synthetic": 6
+    },
+    "review": {
+      "accepted": 6
+    },
+    "split": {
+      "none": 6
+    }
+  },
+  "fixture": "eval/public",
+  "privacy": "public",
+  "rows": 6,
+  "schema": "quoth-evalset/v2",
+  "sha256": "add984a6b01b1c7f810e56e18df952b7da93e99db334a9e7f62477d95354fc38"
+}

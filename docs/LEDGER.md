@@ -102,9 +102,9 @@ time (`assist_busy`), and it yields (`complete: false, yielded: true`) when anot
 session's turn queried in the last 20 seconds. `next_offset` pages through the queue.
 
 **Digest** (`action=digest`, read-only): pending counts by suggestion and by topic, the plan
-(`cleanup` = duplicate + covered + stale + reject, `to_read`, `unsorted`, rounds of 10), each
-junk bucket's `count` and `stamp`, and one group of numbered items (`topic=…`, `bucket=…`,
-or by default the first topic with something to read).
+(`cleanup` = duplicate + covered + stale + reject + dropped_copies, `to_read`, `unsorted`,
+rounds of 10), each junk bucket's `count` and `stamp`, and one group of numbered items
+(`topic=…`, `bucket=…`, or by default the first topic with something to read).
 
 **Duplicates fold into a claim that stays.** Applying a `duplicate` needs its target to be
 accepted and current, or pending with a current `accept` suggestion; otherwise it stays pending
@@ -129,11 +129,28 @@ by age, or replaced by a newer proposal for its slot, latest-wins), its rejected
 to pending in the same transaction (`restored`, `target_dropped`): the owner confirmed them as
 the same fact, never that the fact is wrong, and nothing else would keep it.
 
-**Bucket apply** (`action=apply bucket=duplicate|covered|stale|reject bucket_stamp=…`)
-applies exactly the bucket the owner saw: the stamp must still match (`bucket_changed`),
-a bucket over 200 is refused (`bucket_too_large`), and buckets that add memory (`accept`,
-`keep`) cannot be applied blind. One approving message decides at most 200 claims
-(`approval_cap_reached`).
+**Copies of a memory the owner already dropped.** Releases before 0.18.1 restored an
+original's confirmed copies to pending when the owner dropped the original. Such a copy is
+pending, its latest decision is `restored` with `target_dropped` = X, X's latest decision is
+the owner's `rejected`, and the owner has decided nothing about the copy since. These copies
+form the `dropped_copies` junk bucket (`ledger.dropped_copies`), whatever their suggestion,
+and the other buckets leave them out, so `cleanup` counts each claim once. Copies restored by
+expiry by age or latest-wins are not in it: X then ended as `expired_age` or
+`expired_latest_wins`, without the owner's decision. Neither are copies the owner decided
+again, nor copies of an X whose drop was undone. They need no presort suggestion: the owner
+confirmed them when they first dropped them as duplicates. Applying the bucket rejects each
+as a duplicate of its original (`rejected`, `duplicate_of` = X, the approval's `batch`), so
+`undo` returns them to pending; after an undo they are the owner's to review in the topic
+rounds, no longer in the bucket. `digest bucket=dropped_copies` lists them with `copy_of`
+and `copy_of_text` (the dropped original). Ledger health reports the count (`dropped_copies`).
+
+**Bucket apply** (`action=apply bucket=duplicate|covered|stale|reject|dropped_copies
+bucket_stamp=…`) applies exactly the bucket the owner saw: the stamp must still match
+(`bucket_changed`), a bucket over 200 is refused (`bucket_too_large`), and buckets that add
+memory (`accept`, `keep`) cannot be applied blind. A bigger bucket goes by `ids`, a page per
+reply; for dropped copies that is `action=apply bucket=dropped_copies ids=[…]`, and an id
+that is no longer such a copy is refused (`not_a_dropped_copy`). One approving message
+decides at most 200 claims (`approval_cap_reached`), family re-rejects included.
 
 **Batches and undo.** Every decision records its batch, the locator of the approving
 message. `action=undo` reverts only the batch of the owner's message right before the
@@ -168,9 +185,60 @@ serves `core.md` from `--core-dir` and republishes it after a review changes acc
 ## Health
 
 `quoth ledger health` is red (exit 1) when more than 40 claims are pending or the oldest is
-older than 14 days (`--max-pending`, `--max-age-days`). It also reports pending by kind and
-7-day counts of proposed, re-proposed, accepted, auto-accepted, rejected, superseded,
-expired, forgotten and undone claims. The sidecar's `/v1/health` uses the same rule.
+older than 14 days (`--max-pending`, `--max-age-days`). It also reports pending by kind, the
+pending copies of dropped memories (`dropped_copies`), and 7-day counts of proposed,
+re-proposed, accepted, auto-accepted, rejected, superseded, expired, forgotten and undone
+claims. The sidecar's `/v1/health` uses the same rule.
+
+**Core freshness.** With `--core-dir DIR` (and in the sidecar whenever it runs with
+`--core-dir`), health compiles the core in memory, writing nothing, and compares it with the
+published manifest (`DIR/core.json`):
+
+```json
+"core": {"status": "red", "reason": "core_stale", "published_sha": "<sha256>",
+         "missing": 1, "extra": 0, "compiled_at": "2026-11-06T09:00:00.000Z"}
+```
+
+`missing` counts claims the core would carry now that the published core neither carries
+nor left out for its budget (an accept or edit since it was published); `extra` counts claims
+it carries that are no longer accepted and current (a forget, an edit, an undone accept).
+Counts only, never claim text. The comparison is by claim id, not by the core's sha256:
+injected claims gain `use_count`, which reorders the core without any review. A red core
+adds its reason to `reasons` and turns the whole check red:
+
+| Reason | When |
+|---|---|
+| `core_stale` | `missing` or `extra` is above 0 |
+| `core_unpublished` | nothing is published in `DIR` while accepted core claims exist |
+| `core_unreadable` | `DIR/core.json` cannot be read as a manifest |
+
+The budget compared is `--core-budget` (in the sidecar, the budget it serves), else the
+published manifest's. Publishing again (`compile-core --publish DIR`, or a review through
+the sidecar that changes accepted memory) turns it green.
+
+## Proposal audit
+
+`deploy/diagnostics/quoth-proposal-audit.py` measures where rejected proposals come from. It
+uses only the standard library (python3 ≥ 3.9), opens the ledger with `mode=ro`, and prints
+one JSON document with counts only: no claim text, quotes, notes, locators or ids. Proposer
+names that are not plain labels print as `other`.
+
+```bash
+python3 quoth-proposal-audit.py "$QUOTH_HOME/ledger.db" [--days 30] [--now ISO] [--near 0.8]
+```
+
+For all time and for the last `--days` (by proposal time) it reports each proposal's outcome
+(`accepted`, `accepted_edited`, `rejected`, `duplicate_rejected`, `superseded`, `expired`,
+`pending`) and `rejection_share` (rejections / owner decisions, auto-accepts excluded),
+broken down by origin, proposer, kind at proposal and at decision, `quote_verified`, presort
+suggestion and who made it, mirror action (`memory:add`, `user:replace`, …), text length
+(the `600 (cap)` bin is text the mirror truncated) and coarse text-shape flags (path, URL,
+code, first person, …). It also gives time to decision, decision batch size, how rejections
+were made (`applied_suggestion`, `direct`, `family_of_dropped_claim`), presort precision
+and recall against the owner's final decision, proposals of a text or `subject_key` already
+rejected, and how many rejected claims repeat an earlier rejected text (exact or with word
+overlap ≥ `--near`). `health`'s 7-day counts are events, so a claim rejected, undone and
+rejected again counts twice there; this audit counts claims.
 
 ## Commands
 
@@ -186,7 +254,7 @@ Claim records and reports print as JSON.
 | `forget ID --reason R` | end an accepted claim's validity |
 | `undo-auto ID` | undo an auto-accept |
 | `expire [--days 30] [--dry-run]` | expire pending claims older than N days |
-| `health [--max-pending 40] [--max-age-days 14]` | queue size, age and churn |
+| `health [--max-pending 40] [--max-age-days 14] [--core-dir DIR] [--core-budget N]` | queue size, age and churn; with `--core-dir`, whether the published core is stale |
 | `seed --file FILE` | import JSONL `{"text", "kind"?, "reason"?}` as pending `imported` claims |
 | `nudge` | print one review reminder when claims wait, nothing otherwise (read-only) |
 | `compile-core [--budget 4000] [--headroom 0.2] [--publish DIR]` | print, or publish, the core block |

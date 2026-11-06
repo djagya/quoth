@@ -1,7 +1,7 @@
 ---
 name: memory-review
 description: "Use when the owner asks to review memory, or answers a memory-review nudge: presort the Quoth queue yourself, then walk the owner through it topic by topic in short numbered rounds and apply exactly what they answer."
-version: 3.5.0
+version: 3.6.0
 author: quoth
 ---
 
@@ -58,10 +58,18 @@ Offer the junk buckets in one message, with counts and two or three
 examples each (`action=digest bucket=duplicate`, `covered`, `stale`,
 `reject`): "Clear these? (ok / skip / show duplicates)". Mark a duplicate
 whose `duplicate_target_kept` is false: it will not be applied.
+When `buckets.dropped_copies.count` is N > 0, offer that bucket first in the
+same message: "N copies of memories you already dropped. Clear these? (ok /
+skip / show)".
+These are copies the owner once confirmed as duplicates of a memory they
+later dropped; they need no presort. "show" lists them
+(`action=digest bucket=dropped_copies`: each item's `copy_of_text` is the
+dropped memory). Clearing drops each as a duplicate of that memory.
 On their yes, one `action=apply bucket=<name> bucket_stamp=<buckets.<name>.stamp
 from that digest> approval_quote=<their reply>` per bucket. `bucket_changed`
 means the bucket moved since they saw it: show it again. One reply decides at
-most 200 claims; a bigger bucket goes by `ids`, a page per reply.
+most 200 claims; a bigger bucket goes by `ids`, a page per reply (for the
+copies: `action=apply bucket=dropped_copies ids=[…]`).
 
 ## 4. Topic rounds
 

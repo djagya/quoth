@@ -30,8 +30,9 @@ SPLITS = ("dev", "test")
 # knowledge, a pure task), plausible but absent from the stores, a premise the stores
 # contradict or lack, or a look-alike that must not be injected.
 ABSTAIN_REASONS = ("no_memory_needed", "not_in_vault", "false_premise", "near_miss")
-REVIEWS = ("accepted", "edited", "draft", "rejected")
-# Rows a run scores: drafts and rejected rows stay in the file for review, out of the numbers.
+# `pending`: a machine proposal waiting for the owner (`eval label-claims`), never scored.
+REVIEWS = ("accepted", "edited", "draft", "rejected", "pending")
+# Rows a run scores: drafts, pending and rejected rows stay in the file for review, out of the numbers.
 SCORED_REVIEWS = ("accepted", "edited")
 PROVENANCE_KEYS = {"author", "created_at", "reviewed_by", "reviewed_at", "review", "mined_from"}
 MAX_HOPS = 4
@@ -43,11 +44,16 @@ MATCH_KEYS = {
     "claim_text_contains": ("claims",),
     "subject_key": ("claims",),
     "text_contains": STORES,
+    # A ledger-stable claim anchor, resolved against the target ledger at run time
+    # (`claims_gold.resolve`): {text, id?, subject_key?}. The only key with an object value.
+    "claim": ("claims",),
 }
+CLAIM_ANCHOR_KEYS = {"text", "id", "subject_key"}
+MAX_CLAIM_TEXT = 600  # ledger.core.MAX_CLAIM_CHARS
 ROW_KEYS = {"id", "question", "lang", "asked_at", "context", "kind", "origin", "expect", "tags", "meta",
             "split", "cluster", "hops", "abstain_reason", "provenance", "paraphrase_of"}
 REQUIRED_ROW_KEYS = {"id", "question", "lang", "kind", "origin", "expect"}
-EXPECT_KEYS = {"abstain", "sources", "stale", "answer_hint", "groups", "negatives"}
+EXPECT_KEYS = {"abstain", "sources", "stale", "answer_hint", "groups", "negatives", "claims_judged"}
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{1,8})?$")
 MAX_QUESTION = 2048
@@ -123,11 +129,38 @@ def _source_errors(rid: str, where: str, sources) -> list[str]:
             errors.append(f"{tag}.match key unknown")
         elif src["store"] not in MATCH_KEYS[key]:
             errors.append(f"{tag}.match.{key} not valid for store {src['store']}")
+        elif key == "claim":
+            errors += _anchor_errors(f"{tag}.match.claim", value)
         elif not isinstance(value, str) or not value.strip():
             errors.append(f"{tag}.match.{key} must be a non-empty string")
         elif key == "path" and (PurePosixPath(value).is_absolute() or ".." in PurePosixPath(value).parts):
             errors.append(f"{tag}.match.path must be vault-relative")
     return errors
+
+
+def _anchor_errors(tag: str, value) -> list[str]:
+    """A claim anchor: the claim's full text when labelled, plus optionally its id in the
+    ledger it was labelled on and its subject_key (fallbacks when the text moved)."""
+    if not isinstance(value, dict) or not value or set(value) - CLAIM_ANCHOR_KEYS or "text" not in value:
+        return [f"{tag} must be an object with text and only id, subject_key besides"]
+    errors = []
+    text = value["text"]
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_CLAIM_TEXT:
+        errors.append(f"{tag}.text must be 1..{MAX_CLAIM_TEXT} chars")
+    if "id" in value and (not isinstance(value["id"], int) or isinstance(value["id"], bool) or value["id"] < 1):
+        errors.append(f"{tag}.id must be a positive integer")
+    if "subject_key" in value and (not isinstance(value["subject_key"], str) or not value["subject_key"].strip()):
+        errors.append(f"{tag}.subject_key must be a non-empty string")
+    return errors
+
+
+def claim_anchors(row: dict) -> list[dict]:
+    """Every `claim` anchor of a row (sources, groups, stale, negatives), in order."""
+    expect = row.get("expect") or {}
+    lists = [expect.get("sources") or [], expect.get("stale") or [], expect.get("negatives") or []]
+    lists += [g.get("any_of") or [] for g in expect.get("groups") or [] if isinstance(g, dict)]
+    return [s["match"]["claim"] for lst in lists for s in lst
+            if isinstance(s, dict) and isinstance(s.get("match"), dict) and "claim" in s["match"]]
 
 
 def row_errors(row) -> list[str]:
@@ -171,7 +204,7 @@ def row_errors(row) -> list[str]:
         errors.append(f"{rid}: expect must be an object")
         return errors
     if set(expect) - EXPECT_KEYS or not {"abstain", "sources"} <= set(expect):
-        errors.append(f"{rid}: expect must have abstain, sources and only stale/answer_hint/groups/negatives besides")
+        errors.append(f"{rid}: expect must have abstain, sources and only stale/answer_hint/groups/negatives/claims_judged besides")
     if not isinstance(expect.get("abstain"), bool):
         errors.append(f"{rid}: expect.abstain must be a boolean")
     errors += _source_errors(rid, "expect.sources", expect.get("sources"))
@@ -190,6 +223,11 @@ def row_errors(row) -> list[str]:
         errors.append(f"{rid}: followup rows need context")
     if "negatives" in expect:
         errors += _source_errors(rid, "expect.negatives", expect["negatives"])
+    if "claims_judged" in expect:
+        if not isinstance(expect["claims_judged"], bool):
+            errors.append(f"{rid}: expect.claims_judged must be a boolean")
+        elif expect["claims_judged"] and expect.get("abstain") is True:
+            errors.append(f"{rid}: expect.claims_judged is for answerable rows (an abstain row expects nothing)")
     if "groups" in expect:
         errors += _group_errors(rid, expect)
     errors += _v2_row_errors(rid, row)
@@ -293,6 +331,9 @@ def counts(rows: list[dict], schema: str = SCHEMA) -> dict:
         out["groups"] = sum(1 for r in rows if r["expect"].get("groups"))
         out["abstain_reason"] = dict(sorted(Counter(r["abstain_reason"] for r in rows
                                                     if r.get("abstain_reason")).items()))
+        judged = sum(1 for r in rows if r["expect"].get("claims_judged") is True)
+        if judged:  # only when used: earlier v2 manifests stay valid
+            out["claims_judged"] = judged
     return out
 
 

@@ -28,6 +28,11 @@ def matches(item: dict, store: str, src: dict) -> bool:
         return item.get("locator") == value or (store == "claims" and f"claim:{item.get('id')}" == value)
     if key == "subject_key":
         return item.get("subject_key") == value
+    if key == "claim":
+        # An anchor `eval run` did not resolve (it rewrites every anchor to a locator first):
+        # a claim with the labelled text (no edit or supersede is followed without the ledger).
+        from ..ledger.core import normalize
+        return normalize(str(item.get("text") or "")) == normalize(value["text"])
     text = str(item.get("text") or "").casefold()
     return value.casefold() in text  # claim_text_contains / text_contains
 
@@ -70,6 +75,7 @@ def observe(row: dict, candidates: dict, *, sources: list | None = None, groups:
     return {"id": row["id"], "kind": row["kind"], "origin": row["origin"], "lang": row["lang"],
             "split": row.get("split"), "abstain_reason": row.get("abstain_reason"), "hops": row.get("hops"),
             "abstain": bool(expect["abstain"]), "answerable": bool(sources),
+            "claims_judged": bool(expect.get("claims_judged")) and not expect["abstain"],
             "has_stale": bool(stale), "has_negatives": bool(negatives), "groups": group_obs,
             "stores": stores, "block": len(block), "block_rank": block_rank}
 
@@ -132,6 +138,16 @@ def block(obs: list[dict]) -> dict:
             st["mrr"] = _mean(_rr(min((r for r in o["stores"][store]["ranks"] if r is not None), default=None))
                               for o in rows)
             st["injected_hit_rate"] = _mean(o["stores"][store]["injected_matched"] > 0 for o in rows)
+        judged = [o for o in obs if o.get("claims_judged")] if store == "claims" else []
+        if judged:
+            # Answerable rows whose claims gold the owner judged complete (`expect.claims_judged`):
+            # every claim injected there is known right or wrong. `judged_precision` is the
+            # mean share of right ones over judged rows with a claim injected (None: none was).
+            hit = [o for o in judged if o["stores"][store]["injected"]]
+            st["judged_n"] = len(judged)
+            st["judged_items_mean"] = _mean(o["stores"][store]["injected"] for o in judged)
+            st["judged_precision"] = _mean(o["stores"][store]["injected_matched"] / o["stores"][store]["injected"]
+                                           for o in hit)
         if injected_rows:
             st["injected_precision"] = _mean(
                 o["stores"][store]["injected_matched"] / o["stores"][store]["injected"]

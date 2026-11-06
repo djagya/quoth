@@ -5,6 +5,59 @@ the `v*` tags.
 
 ## Unreleased
 
+### Evals
+
+- **Claims gold that survives a changing ledger.** A row can name an expected claim by an
+  anchor, `{"store": "claims", "match": {"claim": {"text", "id"?, "subject_key"?}}}`. `eval
+  run` resolves it against the target ledger at the start of a run: by id when its text still
+  matches, else by text, else by `subject_key`, then forward through edits and supersedes to
+  the claim that is accepted and current now. Unresolved gold (`not_found`, `ambiguous`,
+  `pending`, `rejected`, `expired`, `forgotten`, `no_ledger`) is reported in the receipt's
+  new `claims_gold` section and taken out of the row, never counted as a miss: a row left
+  with nothing to score is skipped. A `--socket` run resolves against `--ledger`, read-only.
+- **Judged claims precision.** `expect.claims_judged: true` says a row's claims sources are
+  every claim that answers it (possibly none). `stores.claims.judged_n`, `judged_precision`
+  and `judged_items_mean` then say how many injected claims were right; `eval sweep` reports
+  `claims_judged_precision` and suite headlines carry the claims numbers when a set has them.
+- **`quoth eval label-claims SET --ledger DB --out NEWSET`** proposes claims gold for a set's
+  answerable rows from the ledger's accepted claims (dense with a local model, else word
+  overlap) as `review: pending` rows, which are not scored. **`quoth eval review-claims
+  NEWSET`** lets the owner pick the right claims, say none is right, or dismiss, row by row.
+  Nothing is confirmed without the owner; NEWSET is private and the commands print counts only.
+- `provenance.review` gains `pending`; the v2 JSON schema has the anchor and `claims_judged`.
+- The public fixture gains `eval/public/claims.jsonl` (6 synthetic claims-gold rows, run by
+  the `public` suite as `claims`), so CI covers resolution and judged precision.
+
+### Diagnostics
+
+- **Proposal audit.** `deploy/diagnostics/quoth-proposal-audit.py` (stdlib, read-only,
+  counts only) reports where rejected proposals come from: outcomes by origin, proposer, kind,
+  presort suggestion, mirror action, text length and shape, plus presort precision, time to
+  decision, re-proposals after a rejection and repeated rejected texts. Not in the wheel.
+
+### Review
+
+- **Copies of memories you already dropped clear in one step.** Releases before 0.18.1
+  restored an original's confirmed copies to pending when the owner dropped the original.
+  Those copies now form a junk bucket, `dropped_copies`: pending, latest decision `restored`
+  with `target_dropped` = X, X's latest decision the owner's `rejected`, nothing decided
+  since. Copies restored by expiry by age or latest-wins are not in it. Applying the bucket
+  (`apply bucket=dropped_copies bucket_stamp=…`, or a page by `ids`) rejects each as a
+  duplicate of its original under the approval's batch, so `undo` returns them. No presort
+  suggestion is needed; the other junk buckets leave these copies out. The digest and ledger
+  health show the count (`dropped_copies`).
+- The memory-review skill (3.6.0) offers them first in the bulk clean-up: "N copies of
+  memories you already dropped. Clear these? (ok / skip / show)".
+
+### Health
+
+- **A stale core turns health red.** With a core directory (`/v1/health` with `--core-dir`,
+  `quoth ledger health --core-dir DIR`), health compiles the core in memory and compares its
+  claim ids with the published `core.json`: `core: {status, published_sha, missing, extra,
+  compiled_at}`, counts only. Red with `core_stale` when they differ, `core_unpublished` when
+  nothing is published while accepted core claims exist, `core_unreadable` for a broken
+  manifest. A reordering by use counts is not staleness.
+
 ## 0.18.1 — a dropped memory takes its copies; the sidecar republishes the core
 
 No index-contract file changed since 0.18.0: 0.17 snapshots keep serving.

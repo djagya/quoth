@@ -263,8 +263,8 @@ class Quoth:
     # -------------------------------------------------------------- routes
 
     def health(self, _body=None) -> dict:
-        with self.lock:
-            queue = ledger.health(self.conn)
+        with self.lock:  # with --core-dir, also whether the published core is stale (compiled in memory)
+            queue = ledger.health(self.conn, core_dir=self.core_dir, core_budget=self.core_budget)
         snapshot = None
         if self.evidence is not None:
             # Admission state, read without a lease: health never waits behind a turn.
@@ -276,7 +276,7 @@ class Quoth:
                "status": "red" if queue["status"] == "red" or (snapshot or {}).get("status")
                not in (None, "ok") else "green",
                "ledger": {k: queue[k] for k in ("status", "reasons", "pending", "accepted_current",
-                                                "oldest_pending_age_days")},
+                                                "oldest_pending_age_days", "dropped_copies")},
                "evidence": snapshot or {"status": "disabled"},
                "quote_verification": self.state_db is not None,
                "episodes": self._lane_health(self.assistant_lane),
@@ -286,6 +286,8 @@ class Quoth:
         if self.reranker is not None:
             out["reranker"] = self.reranker.status()
         if self.core_dir is not None:
+            out["core"] = {k: queue["core"][k] for k in ("status", "published_sha", "missing", "extra",
+                                                         "compiled_at")}
             out["core_publish"] = self.last_core_publish
         if self.miss_capture is not None:  # counts only: written, dropped, errors, tracked sessions
             out["miss_capture"] = self.miss_capture.counters()
@@ -1015,7 +1017,10 @@ class Quoth:
         stamp_seen = _opt_str(body, "bucket_stamp")
         text, kind = _opt_str(body, "text"), _opt_str(body, "kind")
         note_extra, forget_reason = _opt_str(body, "note"), _opt_str(body, "reason")
-        if bucket is not None:
+        # Copies of dropped originals also clear by page (`ids`, each still such a copy): with no
+        # suggestion behind them, a bucket over the cap has no other way through.
+        paged = bucket == ledger.DROPPED_COPIES and bool(ids)
+        if bucket is not None and not paged:
             # A whole junk bucket, exactly as the owner saw it in the digest (its stamp).
             if ids:
                 raise SidecarError("ids_or_bucket")
@@ -1047,14 +1052,14 @@ class Quoth:
             used = ledger.batch_used(self.conn, locator)
             if used["undone"]:
                 raise SidecarError("approval_spent")  # what was undone is not re-applied on the same words
-            if bucket is not None:
+            if bucket is not None and not paged:
                 ids, stamp = ledger.bucket_state(self.conn, bucket)
                 if stamp != stamp_seen:
                     raise SidecarError("bucket_changed")
                 if len(ids) > ledger.BUCKET_CAP:
                     raise SidecarError("bucket_too_large")
             # A drop also rejects its family's restored copies: they count against the cap too.
-            if action == "reject":
+            if action == "reject" or bucket == ledger.DROPPED_COPIES:
                 dropping = ids
             elif action == "apply":
                 dropping = [cid for cid in ids if (ledger.current_suggestion(self.conn, cid) or {})
@@ -1064,7 +1069,9 @@ class Quoth:
             family = ledger.family_rejects(self.conn, dropping) - set(ids)
             if used["decisions"] + len(ids) + len(family) > ledger.BUCKET_CAP:
                 raise SidecarError("approval_cap_reached")
-            if action == "apply":
+            if bucket == ledger.DROPPED_COPIES:
+                applied = ledger.clear_dropped_copies(self.conn, ids, note=note, batch=locator)
+            elif action == "apply":
                 applied = ledger.apply_suggestions(self.conn, ids, note=note, batch=locator)
         if action == "apply":
             out = {"action": action, "approval_locator": locator,
@@ -1515,7 +1522,8 @@ def _queue_view(app: "Quoth", arg: str) -> str:
         plan = d["plan"]
         lines = [f"Memory review: {d['pending']} waiting", f"By suggestion: {counts}", f"By topic: {topics}"]
         if plan["cleanup"]:
-            lines.append(f"Clean-up first (duplicate, already in your notes, outdated, drop): {plan['cleanup']}; "
+            lines.append(f"Clean-up first (duplicate, already in your notes, outdated, drop, copies of dropped"
+                         f" memories): {plan['cleanup']}; "
                          f"then about {plan['to_read']} to read in ~{plan['rounds']} rounds.")
         lines += ["", "Say 'review memory' in chat to go through it.",
                   "/quoth queue <topic or suggestion> lists one group."]
