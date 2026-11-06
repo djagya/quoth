@@ -339,7 +339,7 @@ Paths default under `$QUOTH_HOME`; the Hermes `state.db` under `$HERMES_HOME`.
 | `--state-db PATH` | `$HERMES_HOME/state.db` | Hermes chat history, read-only; `''` disables quote checks and owner-authored claims |
 | `--db PATH` | off | serving snapshot or pointer; omit to run without vault evidence. A pointer is watched and admitted in the background ([snapshot admission](#snapshot-admission)) |
 | `--snapshot-watch-interval S` | 5 | seconds between checks of the `--db` pointer |
-| `--core-dir DIR` | off | published core directory (`core.md`), republished after each review that changes accepted memory; without it `/v1/core` compiles live |
+| `--core-dir DIR` | off | published core directory (`core.md`), republished after each review that changes accepted memory; health checks it is fresh (`core`); without it `/v1/core` compiles live |
 | `--vault DIR` | off | the live vault root, read-only: each hit says whether its note changed since indexing (`live`) |
 | `--retrieval hybrid\|dense` | `dense` | vault ranking ([vault retrieval](#vault-retrieval)) |
 | `--model NAME` | `bge-m3` | query embedder |
@@ -415,7 +415,7 @@ Integer fields are clamped to their range (`max(lo, min(n, hi))`); for example `
 ```json
 {"ok": true, "schema": "quoth-sidecar/v1", "version": "0.17.0", "status": "green",
  "ledger": {"status": "green", "reasons": [], "pending": 2, "accepted_current": 10,
-            "oldest_pending_age_days": 0.0},
+            "oldest_pending_age_days": 0.0, "dropped_copies": 0},
  "evidence": {"status": "ok", "state": "admitted", "snapshot_id": "<sha256>", "pointer": true,
               "watcher": {"interval_s": 5.0, "last_poll_age_s": 1.2}},
  "quote_verification": true,
@@ -426,8 +426,28 @@ Integer fields are clamped to their range (`max(lo, min(n, hi))`); for example `
  "retrieval": "dense", "live_check": false}
 ```
 
-`status` is `red` when the ledger queue is red (more than 40 pending, or the oldest older
-than 14 days) or `evidence.status` is anything but `ok` or `disabled`. Only an unavailable
+`status` is `red` when the ledger is red (more than 40 pending, the oldest older than 14
+days, or with `--core-dir` a stale core) or `evidence.status` is anything but `ok` or
+`disabled`. `ledger.dropped_copies` counts pending copies of memories the owner already
+dropped (the review's `dropped_copies` bucket).
+
+With `--core-dir`, `core` says whether the published core still matches the ledger, and
+`core_publish` shows the last publish after a review:
+
+```json
+"core": {"status": "red", "published_sha": "<sha256>", "missing": 1, "extra": 0,
+         "compiled_at": "2026-11-06T09:00:00.000Z"},
+"core_publish": {"at": "…", "published": "<sha256>", "claims": 12}
+```
+
+The sidecar compiles the core in memory at the budget it serves and compares claim ids with
+the published `core.json` (docs/LEDGER.md, "Core freshness"): `missing` counts claims the
+core would carry now and the published one does not, `extra` claims it serves that are no
+longer accepted. Counts only, never claim text. When they differ, `core.status` is red and
+`ledger.reasons` holds `core_stale`; with nothing published while accepted core claims exist
+it holds `core_unpublished`, and with an unreadable `core.json` `core_unreadable`. Each turns
+the overall `status` red (HTTP 200). A review that changes accepted memory republishes the
+core and clears it. Only an unavailable
 snapshot answers **503** (`"ok": false, "error": "unhealthy"` plus the same fields), so a
 monitor's status-code alarm means "cannot serve evidence"; a review backlog, or a rejected
 pointer while the previous snapshot still serves, stays 200 with `status: red` in the body.
