@@ -135,6 +135,19 @@ def test_rerank_decisions_and_reasons(score, top, expected):
     assert gate.vault(0.40, 0.70, 0.0, 0, score, top) == expected
 
 
+@pytest.mark.parametrize("cosine,matched,terms,named,expected", [
+    (0.55, 0, 1, False, (False, "short_query")),  # "thanks": the reranker does not make it a question
+    (0.55, 1, 1, False, (True, "rerank")),        # the hit shares the message's word
+    (0.65, 0, 1, False, (True, "rerank")),        # close enough on its own
+    (0.55, 0, 4, False, (True, "rerank")),        # not a short message
+    (0.55, 0, 1, True, (True, "rerank")),         # the message names the note
+    (0.55, 0, None, False, (True, "rerank")),     # word count unknown: the rule is skipped
+])
+def test_the_short_rule_applies_when_the_reranker_decides(cosine, matched, terms, named, expected):
+    gate = Gate(vault_min_rerank=0.01, vault_max_rerank_gap=0.8, vault_short_terms=1, vault_short_min_cosine=0.60)
+    assert gate.vault(cosine, 0.70, 0.0, matched, 0.5, 0.6, named=named, query_terms=terms) == expected
+
+
 def test_rerank_fields_stay_out_of_the_gate_dict_until_set():
     assert Gate().to_dict() == {"vault_min_cosine": None, "vault_max_gap": None, "vault_lexical_rescue": None,
                                 "claims_min_cosine": None, "claims_min_lexical": None}

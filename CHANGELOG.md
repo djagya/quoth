@@ -5,6 +5,15 @@ the `v*` tags.
 
 ## Unreleased
 
+### Recall
+
+- **The short-message rule also holds when a rerank rule decides.** `Gate.vault`'s rerank
+  branch returned before the short-query check, so with any `--vault-min-rerank` /
+  `--vault-max-rerank-gap` a one-word message ("thanks") injected whatever the reranker
+  passed. The rule (at most `vault_short_terms` content words: a shared word or
+  `vault_short_min_cosine` needed) now applies on both paths; a message that names the note
+  still passes. Serving without rerank rules is unchanged.
+
 ## 0.18.2 — clear dropped copies, a stale-core health check, stricter presort, claims gold
 
 No index-contract file and no ledger migration changed since 0.18.1: 0.17 snapshots keep serving.

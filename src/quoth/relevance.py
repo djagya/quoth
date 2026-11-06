@@ -211,6 +211,10 @@ class Gate:
             gap = self.vault_max_rerank_gap
             if gap is not None and rerank_top is not None and round(rerank_top - rerank, 4) > gap:
                 return False, "rerank_gap"
+            # The short-message rule guards whatever decides: a one-word "thanks" is no more a
+            # memory question when the reranker scores its hits.
+            if not named and self._short_rejects(cosine, matched, query_terms):
+                return False, "short_query"
             return True, "rerank"
         if not self.vault_on:
             return True, "off"
@@ -225,11 +229,16 @@ class Gate:
             return False, "below_floor"
         if self.vault_max_gap is not None and top is not None and round(top - cosine, 4) > self.vault_max_gap:
             return False, "gap"
-        if (self.vault_short_terms is not None and query_terms is not None
-                and query_terms <= self.vault_short_terms and not matched
-                and cosine < self.vault_short_min_cosine):
+        if self._short_rejects(cosine, matched, query_terms):
             return False, "short_query"
         return True, "cosine"
+
+    def _short_rejects(self, cosine: float | None, matched: int, query_terms: int | None) -> bool:
+        """A short message (at most `vault_short_terms` content words) injects a hit only when
+        the hit shares one of its words or reaches `vault_short_min_cosine`."""
+        return (self.vault_short_terms is not None and query_terms is not None and cosine is not None
+                and query_terms <= self.vault_short_terms and not matched
+                and cosine < self.vault_short_min_cosine)
 
     def claim(self, cosine: float | None, lexical: float | None, rerank: float | None = None) -> tuple[bool, str]:
         """(passes, reason) for one candidate claim; `cosine` is None for a word-only match,
