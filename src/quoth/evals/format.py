@@ -204,7 +204,7 @@ def row_errors(row) -> list[str]:
         errors.append(f"{rid}: expect must be an object")
         return errors
     if set(expect) - EXPECT_KEYS or not {"abstain", "sources"} <= set(expect):
-        errors.append(f"{rid}: expect must have abstain, sources and only stale/answer_hint/groups/negatives besides")
+        errors.append(f"{rid}: expect must have abstain, sources and only stale/answer_hint/groups/negatives/claims_judged besides")
     if not isinstance(expect.get("abstain"), bool):
         errors.append(f"{rid}: expect.abstain must be a boolean")
     errors += _source_errors(rid, "expect.sources", expect.get("sources"))

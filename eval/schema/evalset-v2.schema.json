@@ -143,6 +143,10 @@
             "$ref": "#/$defs/source"
           },
           "description": "judged look-alikes that must not be injected"
+        },
+        "claims_judged": {
+          "type": "boolean",
+          "description": "answerable rows only: the row's claims sources are every claim that answers it (possibly none), so each injected claim is known right or wrong"
         }
       }
     },
@@ -219,9 +223,10 @@
             "accepted",
             "edited",
             "draft",
-            "rejected"
+            "rejected",
+            "pending"
           ],
-          "description": "draft and rejected rows are not scored"
+          "description": "draft, rejected and pending (a machine proposal awaiting the owner) rows are not scored"
         },
         "mined_from": {
           "type": "string",
@@ -275,6 +280,31 @@
             "text_contains": {
               "type": "string",
               "minLength": 1
+            },
+            "claim": {
+              "type": "object",
+              "description": "claims store only: a ledger-stable anchor, resolved against the target ledger at run time (by id when its text still matches, else by text, else by subject_key; followed through edits and supersedes to the current claim)",
+              "additionalProperties": false,
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 600,
+                  "description": "the claim's full text when labelled"
+                },
+                "id": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "its id in the ledger it was labelled on"
+                },
+                "subject_key": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
             }
           }
         }
@@ -369,6 +399,10 @@
               "additionalProperties": {
                 "type": "integer"
               }
+            },
+            "claims_judged": {
+              "type": "integer",
+              "description": "rows with expect.claims_judged (present only when any)"
             }
           }
         },

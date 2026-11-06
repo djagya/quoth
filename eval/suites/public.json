@@ -5,6 +5,7 @@
   "fixture": "eval/public",
   "sets": [
     {"id": "fixture", "path": "../public/set.jsonl", "role": "smoke"},
+    {"id": "claims", "path": "../public/claims.jsonl", "role": "smoke"},
     {"id": "no-memory", "builtin": "no-memory", "role": "regression"}
   ]
 }
