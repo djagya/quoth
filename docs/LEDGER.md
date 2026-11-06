@@ -143,7 +143,15 @@ rejected and the claim it replaced returns to review. A batch holding a `forget`
 `undo_auto` is refused (`not_undoable`); a claim changed since is left alone
 (`changed_since`); a second undo finds `nothing_to_undo`; an undone message cannot approve
 again (`approval_spent`). When accepts or edits were reverted the reply says
-`core_stale: true`: publish the core again.
+`core_stale: true`.
+
+**The sidecar republishes the core.** With `--core-dir`, every review decision that changes
+accepted memory (`accept`, `edit`, `forget`, `undo_auto`, an `apply` that accepts, an `undo`
+with `core_stale`) ends with `publish_core` under the sidecar's ledger lock, at the budget
+`/v1/core` serves. The reply carries `core: {"published": <sha256>, "claims": <n>}`, or
+`core: {"error": "publish_failed", "reason": <exception class>}` when publishing failed; the
+decision stands either way. Rejects and reads publish nothing. Health shows the last attempt
+(`core_publish`). Without `--core-dir` the core is compiled live and nothing is published.
 
 ## Serving
 
@@ -155,7 +163,7 @@ memory) and puts claims at cosine ≥ 0.5 first, then word matches.
 most used first, up to `budget × (1 − headroom)` characters (default 4000 × 0.8).
 `--publish DIR` writes immutable `core-<sha12>.md` and `.json` (mode 0444), atomically
 repoints `core.md` and `core.json`, and records the version in `core_versions`. The sidecar
-serves `core.md` from `--core-dir`.
+serves `core.md` from `--core-dir` and republishes it after a review changes accepted memory.
 
 ## Health
 

@@ -18,6 +18,14 @@ the `v*` tags.
   `restored_duplicates`, and the re-rejects count toward the 200-decision approval cap.
   Expiry by age and latest-wins still restore copies: the owner never decided those.
 - The memory-review skill (3.4.0) reports a drop as "Dropped #X and its N confirmed copies."
+- **The sidecar republishes the core after a review.** The assistant's gateway has no `quoth`
+  command, so the core it was told to publish could go stale after accepts. With `--core-dir`,
+  each review decision that changes accepted memory (accept, edit, forget, undo_auto, an
+  apply that accepts, an undo that reverts accepts) now publishes the core under the
+  sidecar's lock at the budget it serves, and the reply carries `core: {published, claims}`.
+  A failed publish is reported as `core: {error, reason}` and never fails the decision.
+  Health shows the last attempt (`core_publish`). The memory-review skill (3.5.0) tells the
+  owner the core was updated and runs `compile-core --publish` only on a core error.
 
 ### Evals
 
