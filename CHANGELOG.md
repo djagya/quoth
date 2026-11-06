@@ -3,7 +3,10 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
-## Unreleased
+## 0.19.0 — "what was it before", the short rule under rerank, judged sweep precision
+
+No index-contract file and no ledger migration changed since 0.18.2: 0.17 snapshots keep serving.
+The plugin changed (`memory-caller` skill 2.1.0): reinstall it and reload the gateway.
 
 ### Recall
 
