@@ -98,3 +98,32 @@ def test_without_a_core_dir_nothing_is_published(provider, served, state_db):
     out = _call(provider, "review_claims", action="accept", ids=[a], approval_quote="ok")
     assert out["results"][0]["review_status"] == "accepted" and "core" not in out
     assert "- Likes green tea. [inferred]" in app.core()["text"]  # /v1/core compiles live
+
+
+def test_an_auto_accept_republishes_the_core(provider, served, state_db, tmp_path):
+    app, _ = served
+    app.core_dir = tmp_path / "core"
+    say(state_db, "I moved to Quendorf last spring")
+    stated = _call(provider, "propose_claim", text="Alex lives in Quendorf.", kind="identity",
+                   reason="the owner said so", quote="moved to Quendorf", confidence=0.95)
+    assert stated["auto_accepted"] is True
+    assert stated["core"]["claims"] == 1 and "Quendorf" in _published(app)
+    pending = _call(provider, "propose_claim", text="Alex likes long walks.", kind="preference", reason="x")
+    assert "core" not in pending  # nothing accepted: nothing published
+
+
+def test_startup_publishes_a_missing_or_stale_core(provider, served, tmp_path):
+    app, _ = served
+    app.core_dir = tmp_path / "core"
+    assert app.ensure_core_published() is None  # nothing accepted: nothing to publish
+    with app.lock:
+        claim = _taste(app.conn, "Likes green tea.")
+        core.accept(app.conn, claim)
+    out = app.ensure_core_published()  # never published, the core would carry a claim
+    assert out["claims"] == 1 and "green tea" in _published(app)
+    assert app.ensure_core_published() is None  # current: no second publish
+    with app.lock:
+        core.accept(app.conn, _taste(app.conn, "Reads at night."))  # an accept outside a review
+    assert app.ensure_core_published()["claims"] == 2 and "Reads at night" in _published(app)
+    app.core_dir = None
+    assert app.ensure_core_published() is None
