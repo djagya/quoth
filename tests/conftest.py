@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import os
+import sys
 import textwrap
 from pathlib import Path
 
 import pytest
 
-from quoth.db import open_db
+# Test this checkout's source. `pythonpath` in pyproject.toml puts its src/ and root first on
+# sys.path (an editable install may point the interpreter at another checkout); subprocesses
+# (the console script, `python -m quoth`) get the same through PYTHONPATH, and this
+# interpreter's bin/ leads PATH so `quoth` is its console script.
+ROOT = Path(__file__).resolve().parents[1]
+os.environ["PYTHONPATH"] = os.pathsep.join(
+    [str(ROOT / "src"), str(ROOT)] + [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+                                      if p and p not in (str(ROOT / "src"), str(ROOT))])
+os.environ["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), os.environ.get("PATH", "")])
+
+from quoth.db import open_db  # noqa: E402
 
 NOTES = {
     "Vault Conventions.md": """\

@@ -30,6 +30,8 @@ dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# This checkout's source first, ahead of any editable install of another checkout.
+pythonpath = ["src", "."]
 markers = [
     "personal: scores your own suite on a real snapshot; needs QUOTH_PERSONAL_SUITE and QUOTH_PERSONAL_DB, skipped otherwise (docs/EVAL.md#personal-suite)",
 ]
