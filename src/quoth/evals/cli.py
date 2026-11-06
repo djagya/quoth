@@ -1,4 +1,4 @@
-"""`quoth eval run|validate|convert|compare|sweep|online|fixture|review`.
+"""`quoth eval run|validate|convert|compare|sweep|online|fixture|review|label-claims|review-claims`.
 
 Exit codes: 0 ok/pass, 1 regression (compare) or invalid set (validate), 2 unusable input
 or usage error, 3 run not comparable / gold drift excessive.
@@ -58,6 +58,7 @@ def _target(a):
                            " (see /v1/health)")
         target = SocketTarget(a.socket, evidence_budget=30.0 if a.evidence_budget is None else a.evidence_budget)
         target.db = a.db  # read-only, only for --gold-drift against the served snapshot
+        target.ledger = a.ledger  # read-only, only to resolve claims gold against the served ledger
         return target
     if a.fixture_dir:
         d = Path(a.fixture_dir)
@@ -137,6 +138,10 @@ def _cmd_run(a) -> int:
         except (OSError, ValueError) as exc:
             _err(f"invalid oracle file: {type(exc).__name__}")
             return 2
+    from .claims_gold import has_anchors
+    if a.socket and not a.ledger and has_anchors(evalset.rows):
+        print("warning: the set has claims gold; without --ledger it stays unresolved (no_ledger) and"
+              " claims-only rows are not scored", file=sys.stderr)
     trace = [] if a.trace_out else None
     try:
         receipt, detail = run_set(evalset, target, k_candidates=a.k_candidates,
@@ -184,7 +189,7 @@ def _target_arguments(pr) -> None:
     pr.add_argument("--socket", help="live sidecar socket instead of an in-process build")
     pr.add_argument("--fixture-dir", help="directory built by `eval fixture` (fills the store paths)")
     pr.add_argument("--db", help="serving snapshot or pointer (omit: no vault store)")
-    pr.add_argument("--ledger")
+    pr.add_argument("--ledger", help="ledger DB; with --socket, read-only to resolve claims gold (docs/EVAL.md#claims-gold)")
     pr.add_argument("--state-db")
     pr.add_argument("--episodes", help="assistant lane DB (what the assistant said)")
     pr.add_argument("--owner-episodes", help="owner lane DB (what the owner wrote)")
@@ -353,6 +358,32 @@ def _cmd_review(a) -> int:
     return 0
 
 
+def _cmd_label_claims(a) -> int:
+    from .label_claims import LabelError, label_errors, propose
+    try:
+        label_errors(a.ledger)
+        summary = propose(a.set, a.ledger, a.out, model=None if a.lexical else a.model, top=a.top,
+                          min_score=a.min_score, privacy=a.privacy)
+    except (LabelError, EvalSetError, OSError, ValueError) as exc:
+        _err(f"label-claims failed: {exc}")
+        return 2
+    _print(summary)
+    return 0
+
+
+def _cmd_review_claims(a) -> int:
+    from .label_claims import LabelError, label_errors, review_claims
+    try:
+        if a.ledger:
+            label_errors(a.ledger)
+        summary = review_claims(a.set, ledger=a.ledger)
+    except (LabelError, EvalSetError, OSError, ValueError) as exc:
+        _err(f"review-claims failed: {exc}")
+        return 2
+    _print(summary)
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="quoth eval", description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -467,6 +498,24 @@ def main(argv=None) -> int:
     pq.add_argument("--fixture", default="private", help="manifest fixture of a new set")
     pq.add_argument("--stats", action="store_true", help="counts by signal only (no text), then exit")
     pq.set_defaults(func=_cmd_review)
+
+    pl = sub.add_parser("label-claims", help="propose claims gold for a set's rows from a ledger (owner confirms)")
+    pl.add_argument("set")
+    pl.add_argument("--ledger", required=True, help="ledger DB (opened read-only)")
+    pl.add_argument("--out", required=True, help="the new set: rows with candidates become review: pending")
+    pl.add_argument("--model", default="bge-m3", help="local embedding model (default bge-m3; word overlap"
+                                                      " when it is not installed)")
+    pl.add_argument("--lexical", action="store_true", help="score by word overlap only")
+    pl.add_argument("--top", type=int, default=5, help="candidates per row (default 5)")
+    pl.add_argument("--min-score", type=float, default=None, help="leave out candidates scoring under this")
+    pl.add_argument("--privacy", choices=("private", "public"), default="private",
+                    help="the new set's privacy (public only from a public set)")
+    pl.set_defaults(func=_cmd_label_claims)
+
+    pk = sub.add_parser("review-claims", help="confirm or reject label-claims proposals in a terminal")
+    pk.add_argument("set", help="the set label-claims wrote (rewritten after each decision)")
+    pk.add_argument("--ledger", help="ledger DB: a picked claim must still be accepted and current there")
+    pk.set_defaults(func=_cmd_review_claims)
 
     a = p.parse_args(argv)
     if a.cmd == "run" and not a.socket and not a.ledger and not a.fixture_dir:

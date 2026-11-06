@@ -127,7 +127,7 @@ def _suite(tmp_path, sets, fixture="eval/public"):
 
 def test_suite_files_are_checked(tmp_path):
     suite = load_suite(REPO / "eval" / "suites" / "public.json")
-    assert [e.id for e in suite.entries] == ["fixture", "no-memory"] and suite.fixture == "eval/public"
+    assert [e.id for e in suite.entries] == ["fixture", "claims", "no-memory"] and suite.fixture == "eval/public"
     assert all(load_entry(suite, e).rows for e in suite.entries)
     with pytest.raises(SuiteError):
         load_suite(_suite(tmp_path, [{"id": "x", "builtin": "no-memory", "role": "judge"}]))

@@ -5,6 +5,29 @@ the `v*` tags.
 
 ## Unreleased
 
+### Evals
+
+- **Claims gold that survives a changing ledger.** A row can name an expected claim by an
+  anchor, `{"store": "claims", "match": {"claim": {"text", "id"?, "subject_key"?}}}`. `eval
+  run` resolves it against the target ledger at the start of a run: by id when its text still
+  matches, else by text, else by `subject_key`, then forward through edits and supersedes to
+  the claim that is accepted and current now. Unresolved gold (`not_found`, `ambiguous`,
+  `pending`, `rejected`, `expired`, `forgotten`, `no_ledger`) is reported in the receipt's
+  new `claims_gold` section and taken out of the row, never counted as a miss: a row left
+  with nothing to score is skipped. A `--socket` run resolves against `--ledger`, read-only.
+- **Judged claims precision.** `expect.claims_judged: true` says a row's claims sources are
+  every claim that answers it (possibly none). `stores.claims.judged_n`, `judged_precision`
+  and `judged_items_mean` then say how many injected claims were right; `eval sweep` reports
+  `claims_judged_precision` and suite headlines carry the claims numbers when a set has them.
+- **`quoth eval label-claims SET --ledger DB --out NEWSET`** proposes claims gold for a set's
+  answerable rows from the ledger's accepted claims (dense with a local model, else word
+  overlap) as `review: pending` rows, which are not scored. **`quoth eval review-claims
+  NEWSET`** lets the owner pick the right claims, say none is right, or dismiss, row by row.
+  Nothing is confirmed without the owner; NEWSET is private and the commands print counts only.
+- `provenance.review` gains `pending`; the v2 JSON schema has the anchor and `claims_judged`.
+- The public fixture gains `eval/public/claims.jsonl` (6 synthetic claims-gold rows, run by
+  the `public` suite as `claims`), so CI covers resolution and judged precision.
+
 ## 0.18.1 — a dropped memory takes its copies; the sidecar republishes the core
 
 No index-contract file changed since 0.18.0: 0.17 snapshots keep serving.
