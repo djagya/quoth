@@ -2,7 +2,9 @@
 
 Candidate lists come from the sidecar's dry-run ``detail.candidates``: one ranked list per
 store (``vault``, ``claims``, ``owner``, ``assistant``), each item flagged ``injected`` when it
-reached the recall block. Expected and stale sources are matched against those items.
+reached the recall block. Expected and stale sources are matched against those items. A
+claims item with `history_of` is a past value served under its current claim; it matches
+gold like any claim (a `follow: edits` anchor resolves to it).
 """
 from __future__ import annotations
 
@@ -59,7 +61,9 @@ def observe(row: dict, candidates: dict, *, sources: list | None = None, groups:
         negative_injected = [it for it in injected if any(matches(it, store, s) for s in negatives)]
         stores[store] = {"expected": len(wanted), "ranks": first, "candidates": len(items),
                          "injected": len(injected), "injected_matched": len(hit_injected),
-                         "stale_injected": len(stale_injected), "negative_injected": len(negative_injected)}
+                         "stale_injected": len(stale_injected), "negative_injected": len(negative_injected),
+                         # Past values served under their current claim (`history_of`): a past-intent turn.
+                         "history_injected": sum(1 for it in injected if it.get("history_of") is not None)}
     block = [(store, it) for store in BLOCK_ORDER for it in (candidates.get(store) or []) if it.get("injected")]
     block_rank = next((i for i, (store, it) in enumerate(block, 1)
                        if any(matches(it, store, s) for s in sources)), None)
@@ -161,6 +165,10 @@ def block(obs: list[dict]) -> dict:
             st["mrr"] = _mean(_rr(min((r for r in o["stores"][store]["ranks"] if r is not None), default=None))
                               for o in rows)
             st["injected_hit_rate"] = _mean(o["stores"][store]["injected_matched"] > 0 for o in rows)
+        if store == "claims":
+            # Rows where a past value was injected (the past path ran and found one). A past value
+            # that matches `follow: edits` gold counts as a hit like any injected claim.
+            st["history_rate"] = _mean(o["stores"][store].get("history_injected", 0) > 0 for o in obs)
         judged = [o for o in obs if o.get("claims_judged")] if store == "claims" else []
         if judged:
             # Answerable rows whose claims gold the owner judged complete (`expect.claims_judged`):

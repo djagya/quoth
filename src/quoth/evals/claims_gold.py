@@ -9,12 +9,19 @@ a new claim, so the anchor is resolved at run time, never trusted as is:
    (`ledger.core.normalize`: case, spacing and final punctuation aside), else by text over
    every claim of the ledger (nothing is ever deleted, so an edited or superseded claim is
    still there). With neither, the one accepted current claim of `subject_key`.
-2. **Follow it forward** through `superseded_by` (an owner's edit or a supersede) to the
-   claim that holds the slot now. That claim must be accepted and current: the anchor then
-   becomes `{"locator": "claim:<id>"}` for this run. Stale anchors are not followed (the
-   stale value is that exact claim).
-3. **Otherwise it is unresolved**, with a reason: `not_found`, `ambiguous` (several current
-   claims), `pending`, `rejected`, `expired`, `forgotten`, or `no_ledger` (a socket run
+2. **Follow it** as the anchor's `follow` says (`format.FOLLOW_MODES`):
+   - `current` (default): forward through `superseded_by` (an owner's edit or a supersede)
+     to the claim that holds the slot now, which must be accepted and current;
+   - `edits`: forward through the owner's edits only (rewordings of the same value), stopping
+     at a supersede, so the gold is the value as it was. A value a newer fact replaced
+     resolves as `historical` (accepted, superseded, never forgotten): recall serves it as a
+     past value on a past-intent turn (`ledger.core.history`);
+   - `none`: that exact claim, current or historical (an old wording an edit replaced is
+     `edited`: it is never served).
+   The anchor then becomes `{"locator": "claim:<id>"}` for this run. Stale anchors are not
+   followed and not checked (the stale value is that exact claim).
+3. **Otherwise it is unresolved**, with a reason: `not_found`, `ambiguous` (several claims),
+   `pending`, `rejected`, `expired`, `forgotten`, `edited`, or `no_ledger` (a socket run
    without `--ledger`). Unresolved gold is removed from the row and reported in the receipt's
    `claims_gold`; a row left with no expected source is not scored at all, so an unresolved
    anchor is never counted as a miss.
@@ -31,9 +38,11 @@ from urllib.parse import quote
 from ..ledger.core import normalize
 from .format import claim_anchors
 
-REASONS = ("not_found", "ambiguous", "pending", "rejected", "expired", "forgotten", "no_ledger")
+REASONS = ("not_found", "ambiguous", "pending", "rejected", "expired", "forgotten", "edited", "no_ledger")
 # When several labelled copies end unresolved, the reason reported (most actionable first).
-_REASON_ORDER = ("pending", "forgotten", "rejected", "expired")
+_REASON_ORDER = ("pending", "forgotten", "rejected", "expired", "edited")
+# Claim states an anchor resolves to, per follow mode.
+_SERVED = {"current": ("current",), "edits": ("current", "historical"), "none": ("current", "historical")}
 MAX_CHAIN = 1000
 
 
@@ -75,40 +84,60 @@ class Resolver:
                 self._by_text.setdefault(normalize(t), []).append(cid)
         return self._by_text.get(normalize(text), [])
 
-    @staticmethod
-    def _state(row) -> str:
+    def _is_edit(self, claim_id: int) -> bool:
+        return self.conn.execute("SELECT 1 FROM ledger_events WHERE claim_id = ? AND action = 'edited_from'"
+                                 " LIMIT 1", (claim_id,)).fetchone() is not None
+
+    def _state(self, row) -> str:
+        """current | historical (a past value a newer fact replaced) | edited (an old wording)
+        | superseded (another replaced claim) | forgotten | pending | rejected | expired."""
         if row["superseded_by"] is not None:
-            return "superseded"
+            if self._is_edit(row["superseded_by"]):
+                return "edited"
+            if row["review_status"] == "accepted" and row["valid_to"] is not None and not row["forget_reason"]:
+                return "historical"
+            return "superseded" if row["review_status"] == "accepted" else row["review_status"]
         if row["review_status"] == "accepted":
             return "current" if row["valid_to"] is None else "forgotten"
         return row["review_status"]  # pending | rejected | expired
 
-    def _follow(self, claim_id: int) -> tuple[sqlite3.Row, Counter]:
-        """The claim at the end of `claim_id`'s supersede chain, and its steps by kind."""
+    def _follow(self, claim_id: int, edits_only: bool = False) -> tuple[sqlite3.Row, Counter]:
+        """The claim at the end of `claim_id`'s supersede chain (with `edits_only`, of its edit
+        chain: the last wording of that value), and its steps by kind."""
         steps, seen = Counter(), {claim_id}
         row = self._row(claim_id)
         while row["superseded_by"] is not None and len(seen) < MAX_CHAIN:
             nxt = row["superseded_by"]
             if nxt in seen:
                 break  # a cycle never happens in a sound ledger; stop rather than loop
+            edited = self._is_edit(nxt)
+            if edits_only and not edited:
+                break  # a newer fact replaced this value: the gold is the value as it was
             seen.add(nxt)
-            edited = self.conn.execute("SELECT 1 FROM ledger_events WHERE claim_id = ? AND action = 'edited_from'"
-                                       " LIMIT 1", (nxt,)).fetchone()
             steps["edit" if edited else "supersede"] += 1
             row = self._row(nxt)
         return row, steps
 
-    def resolve(self, anchor: dict, follow: bool = True) -> dict:
+    def resolve(self, anchor: dict, follow: bool | str | None = None) -> dict:
         """{"ids": [claim id, …] (one when followed), "how": id|text|subject_key, "steps":
-        {edit, supersede}} when resolved, else {"ids": [], "reason": code}."""
+        {edit, supersede}, "historical"?: true} when resolved, else {"ids": [], "reason": code}.
+
+        `follow`: None or True, the anchor's own mode (`follow`, default `current`); a mode
+        name (`format.FOLLOW_MODES`); False, a stale anchor's lookup (the exact claims, unchecked)."""
         if self.conn is None:
             return {"ids": [], "reason": "no_ledger"}
+        if follow is False:
+            mode = "stale"
+        elif follow in (None, True):
+            mode = anchor.get("follow") or "current"
+        else:
+            mode = follow
         if self.lock is not None:
             with self.lock:
-                return self._resolve(anchor, follow)
-        return self._resolve(anchor, follow)
+                return self._resolve(anchor, mode)
+        return self._resolve(anchor, mode)
 
-    def _resolve(self, anchor: dict, follow: bool) -> dict:
+    def _resolve(self, anchor: dict, mode: str) -> dict:
         starts, how = [], None
         if anchor.get("id") is not None:
             row = self._row(anchor["id"])
@@ -117,7 +146,8 @@ class Resolver:
         if not starts:
             starts = self._ids_by_text(anchor["text"])
             how = "text" if starts else None
-        if not starts and anchor.get("subject_key"):
+        if not starts and anchor.get("subject_key") and mode == "current":
+            # Only the value that holds the slot now can be found by its slot.
             current = [r["id"] for r in self.conn.execute(
                 "SELECT * FROM claims WHERE subject_key = ? AND review_status = 'accepted' AND valid_to IS NULL"
                 " AND superseded_by IS NULL ORDER BY id", (anchor["subject_key"],))]
@@ -126,17 +156,23 @@ class Resolver:
             return {"ids": [], "reason": "ambiguous" if current else "not_found"}
         if not starts:
             return {"ids": [], "reason": "not_found"}
-        if not follow:
+        if mode == "stale":
             return {"ids": sorted(starts), "how": how, "steps": {}}
         ends, steps = {}, Counter()
         for cid in starts:
-            row, walked = self._follow(cid)
+            if mode == "none":
+                row, walked = self._row(cid), Counter()
+            else:
+                row, walked = self._follow(cid, edits_only=mode == "edits")
             ends[row["id"]] = self._state(row)
             steps += walked
-        current = sorted(cid for cid, state in ends.items() if state == "current")
-        if len(current) == 1:
-            return {"ids": current, "how": how, "steps": dict(steps)}
-        if current:
+        served = sorted(cid for cid, state in ends.items() if state in _SERVED[mode])
+        if len(served) == 1:
+            out = {"ids": served, "how": how, "steps": dict(steps)}
+            if ends[served[0]] == "historical":
+                out["historical"] = True
+            return out
+        if served:
             return {"ids": [], "reason": "ambiguous"}
         states = set(ends.values())
         return {"ids": [], "reason": next((r for r in _REASON_ORDER if r in states), "not_found")}
@@ -159,22 +195,23 @@ def resolve_rows(rows: list[dict], resolver: Resolver | None) -> tuple[dict, dic
     resolver = resolver or Resolver(None)
     cache: dict = {}
 
-    def lookup(anchor: dict, follow: bool) -> dict:
-        key = (anchor.get("text"), anchor.get("id"), anchor.get("subject_key"), follow)
+    def lookup(anchor: dict, follow: bool | None) -> dict:
+        key = (anchor.get("text"), anchor.get("id"), anchor.get("subject_key"), anchor.get("follow"), follow)
         if key not in cache:
             cache[key] = resolver.resolve(anchor, follow)
         return cache[key]
 
     out, how, steps, reasons, stale = {}, Counter(), Counter(), Counter(), Counter()
     excluded, partial = [], []
+    historical = 0
     for row in rows:
         if not claim_anchors(row):
             continue
         expect = row["expect"]
         lost = False
 
-        def rewrite(src: dict, follow: bool = True, count: bool = True) -> list[dict]:
-            nonlocal lost
+        def rewrite(src: dict, follow: bool | None = None, count: bool = True) -> list[dict]:
+            nonlocal lost, historical
             if src["store"] != "claims" or "claim" not in src["match"]:
                 return [src]
             got = lookup(src["match"]["claim"], follow)
@@ -182,6 +219,7 @@ def resolve_rows(rows: list[dict], resolver: Resolver | None) -> tuple[dict, dic
                 if got["ids"]:
                     how[got["how"]] += 1
                     steps.update(got.get("steps") or {})
+                    historical += bool(got.get("historical"))
                 else:
                     reasons[got["reason"]] += 1
             if not got["ids"]:
@@ -223,6 +261,8 @@ def resolve_rows(rows: list[dict], resolver: Resolver | None) -> tuple[dict, dic
                                                             "supersede": steps.get("supersede", 0)},
               "unresolved": dict(sorted(reasons.items())), "rows_excluded": excluded, "rows_partial": partial,
               "ledger": resolver.conn is not None}
+    if historical:
+        report["historical"] = historical  # anchors resolved to a past value (`follow: edits|none`)
     if stale:
         report["stale"] = {"resolved": stale.get("resolved", 0), "unresolved": stale.get("unresolved", 0)}
     return out, report

@@ -32,6 +32,7 @@ from __future__ import annotations
 from itertools import product
 import math
 
+from .. import history
 from .. import recall_defaults as D
 from .. import relevance
 from . import metrics as M
@@ -76,6 +77,7 @@ def record(row: dict, candidates: dict, sources: list, timings: dict | None = No
         wanted = [s for s in sources if s["store"] == store]
         items = []
         notes: dict = {}  # a vault candidate's note as a per-row index (no paths in a receipt)
+        anchors: dict = {}  # a current claim's id -> its item index (a past value points at it)
         for it in candidates.get(store) or []:
             lexical, matched = it.get("lexical"), it.get("matched")
             if store == "vault" and (lexical is None or matched is None):
@@ -99,6 +101,13 @@ def record(row: dict, candidates: dict, sources: list, timings: dict | None = No
                 item["named"] = True
             if any(M.matches(it, store, s) for s in stale):
                 item["stale"] = True
+            if store == "claims":
+                if it.get("history_of") is not None:
+                    if it["history_of"] not in anchors:
+                        continue  # its current claim is not in the list: never served
+                    item["history_of"] = anchors[it["history_of"]]
+                else:
+                    anchors.setdefault(it.get("id"), len(items))
             if it.get("rerank") is not None:  # 0.13.2 with a reranker loaded
                 item["rerank"] = it["rerank"]
                 if it.get("rerank_ms") is not None:
@@ -131,7 +140,9 @@ def _passes(gate: relevance.Gate, store: str, items: list[dict], terms: int | No
                     "named": bool(it.get("named"))} for it in items]
         return [ok for ok, _ in relevance.decide_vault(gate, signals, PREFETCH_EVIDENCE, _rerank(items), terms)]
     if store == "claims":
-        return [gate.claim(it["score"], it.get("lexical"), it.get("rerank"))[0] for it in items]
+        passed = [gate.claim(it["score"], it.get("lexical"), it.get("rerank"))[0] for it in items]
+        # A past value shares its current claim's verdict (the sidecar's rule).
+        return [passed[it["history_of"]] if "history_of" in it else ok for it, ok in zip(items, passed)]
     return [True] * len(items)
 
 
@@ -143,7 +154,14 @@ def _injected(gate: relevance.Gate, store: str, items: list[dict], passed: list[
         return [items[i] for i in relevance.vault_pick(gate, passed, pool, PREFETCH_EVIDENCE, _rerank(items),
                                                        notes=[it.get("note") for it in items])]
     if store == "claims":
-        return [it for it, ok in zip(items, passed) if it["pool"] and ok][:PREFETCH_CLAIMS]
+        current = [i for i, (it, ok) in enumerate(zip(items, passed)) if it["pool"] and ok and "history_of" not in it]
+        past: dict = {}
+        for i, it in enumerate(items):
+            if "history_of" in it:
+                past.setdefault(it["history_of"], []).append(i)
+        # Past values (recorded on a past-intent turn) follow their current claim inside the cap.
+        return [items[i] for i in history.interleave(current, past, PREFETCH_CLAIMS, D.HISTORY_PER_CLAIM,
+                                                     key=lambda i: i)]
     return [it for it in items if it["injected"]]
 
 
