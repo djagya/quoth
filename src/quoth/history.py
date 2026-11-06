@@ -76,6 +76,12 @@ _RU_NOT_VERBS = frozenset(("стол", "пол", "зал", "угол", "кана
 _YEAR = re.compile(r"\b(?:in|back in|during|as of|в|во|за|im|im jahr|im jahre)\s+(\d{4})\b")
 _ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 _SENTENCES = re.compile(r"[^.!?;\n]+")
+# One pass over the whole turn: no cue word and no 4-digit number means no past intent, so
+# most turns stop here (a few microseconds) before the per-sentence rules run.
+_PREFILTER = re.compile(r"before|earlier|prior|previous|formerly|back then|in the past|what (?:was|were)"
+                        r"|last year|use(?:d)? to|раньше|прежде|до этого|до того|в прошлом|когда-то|что был"
+                        r"|damals|ehemal|früher|vorher|zuvor|letztes jahr|voriges jahr|im letzten jahr"
+                        r"|im vorigen jahr|\d{4}")
 _STRONG_RE = [(name, re.compile(rx)) for name, rx in _STRONG.items()]
 _WEAK_RE = [(name, re.compile(rx)) for name, rx in _WEAK.items()]
 _MARKER_RE = [re.compile(rx) for rx in _PAST_MARKERS]
@@ -98,7 +104,7 @@ def past_cue(text: str, today: date | None = None) -> str | None:
     turn does not ask about the past. `today` bounds the year and date cues (a year counts
     only when it is before this one; a date only when it is before today)."""
     folded = _fold(text)
-    if not folded.strip():
+    if not folded.strip() or not _PREFILTER.search(folded):
         return None
     today = today or date.today()
     for sentence in _SENTENCES.findall(folded):

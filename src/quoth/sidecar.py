@@ -5,10 +5,10 @@ here, behind JSON over HTTP on a Unix socket. One process serves:
 
 - ``GET  /v1/health``      sidecar, snapshot and ledger-queue status (503 when the snapshot is unavailable)
 - ``GET  /v1/core``        the compiled core block (published ``core.md`` when present)
-- ``POST /v1/prefetch``    accepted claims + top vault evidence for a turn, pre-formatted
+- ``POST /v1/prefetch``    accepted claims (and, on a past-intent turn, the values they replaced) + top vault evidence for a turn, pre-formatted
 - ``POST /v1/propose``     ``propose_claim``: always pending unless the auto-accept rule holds
 - ``POST /v1/review``      ``review_claims``: reading is free; decisions need the owner's words
-- ``POST /v1/evidence``    ``evidence_bundle``, identical to the read-only MCP tool
+- ``POST /v1/evidence``    ``evidence_bundle``, identical to the read-only MCP tool (``include_history`` adds past values)
 - ``POST /v1/mirror``      Hermes built-in MEMORY/USER writes, kept as pending ``imported`` claims
 - ``POST /v1/view``        read-only text views for the ``/quoth`` chat command
 - ``POST /v1/episodes``    earlier chat messages: what the assistant said, or what the owner wrote
