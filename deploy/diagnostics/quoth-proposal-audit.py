@@ -192,7 +192,6 @@ def facts(data: dict) -> list[dict]:
                 continue  # the edit's own accept: its decision is counted on the edited claim
             target = edit_of.get(cid, cid) if e["action"] == "edited_from" else cid
             batch_of[target] = detail["batch"]
-    edited_by = {prev: new for new, prev in edit_of.items()}
     batch_sizes = Counter(batch_of.values())
     out = []
     for cid, c in claims.items():
@@ -257,7 +256,7 @@ def facts(data: dict) -> list[dict]:
                 "quote_verified": str(c["quote_verified"]),
                 "suggestion": tip["action"] if tip else "none",
                 "suggested_by": label(tip["suggested_by"]) if tip else "none",
-                "mirror_action": f"{mirror.group(1)}:{mirror.group(2)}" if mirror else "not_mirrored",
+                "mirror_action": label(f"{mirror.group(1)}:{mirror.group(2)}") if mirror else "not_mirrored",
                 "has_subject_key": str(bool(c["subject_key"])).lower(),
                 "text_length": text_bin(len(c["text"])),
             },
