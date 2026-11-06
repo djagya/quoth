@@ -176,6 +176,34 @@ Recall returns accepted, current claims only; pending proposals are never served
 sidecar ranks accepted claims by meaning (`claim_index.py` keeps their BGE-M3 vectors in
 memory) and puts claims at cosine ≥ 0.5 first, then word matches.
 
+### Past values ("what was it before")
+
+A claim that a newer fact replaced is a **past value**: it was accepted and later superseded
+(by `supersedes` or the same `subject_key`), so it has a `valid_to` and a `superseded_by`.
+Recall serves past values only on a turn that asks about the past, and only under the
+current claim that replaced them (`ledger.core.history`, `quoth.history`):
+
+- **What counts.** Only accepted values that a newer accepted fact superseded. An owner's
+  edit (`proposer = review_edit`) rewords the same value, so the old wording is never a past
+  value of its own: the walk follows it as the same value (shown in its latest wording,
+  valid from its first wording's acceptance). Forgotten claims (the owner wanted them gone),
+  rejected, expired and pending ones are never past values; the walk stops at them.
+- **When.** A small lexical detector of past intent (English, Russian, German: "before",
+  "used to", "previously", "earlier", "back then", "what was", "раньше", "прежде", "до
+  этого", "früher", "vorher", "damals", a past year such as "in 2019", a past ISO date).
+  Weak words ("before", "earlier", "раньше", "früher", "vorher") count only next to a
+  past-tense verb in the same sentence, so "Before I go, where do I live?" is not a past
+  question. Callers override it with `include_history` (true forces, false turns it off).
+- **How.** One recursive SQL query over the `supersedes` links of the turn's pool claims,
+  run only on a past turn; other turns run no extra query. A past value shares its current
+  claim's gate verdict and counts toward the same claims cap (6), right after its current
+  claim, newest first, at most 3 per claim.
+- **Shown as past.** An indented `previously (from 2026-03-01 until 2026-10-01; replaced by
+  #15, not current): …` line under the current claim. The dates are ledger dates (when
+  memory held the value), not when it was true in the world.
+
+The owner's `/quoth item N` still shows any claim's whole trail, past values or not.
+
 `compile-core` renders accepted claims of the core kinds (episodes excluded) by section,
 most used first, up to `budget × (1 − headroom)` characters (default 4000 × 0.8).
 `--publish DIR` writes immutable `core-<sha12>.md` and `.json` (mode 0444), atomically
@@ -266,6 +294,7 @@ refused the action (`{"error": code}` on stderr).
 
 The public eval fixture seeds update chains (`eval/public/ledger-seed.jsonl`), and its
 `knowledge_update` rows require the newest value to be served and no superseded value to be
-injected (`stores.claims.hit@1`, `stale_leak`). See [EVAL.md](EVAL.md).
+injected (`stores.claims.hit@1`, `stale_leak`). Rows that ask what a value was before name
+it with `follow: edits` (the value as it was, served as a past value). See [EVAL.md](EVAL.md).
 
 The Hermes side (tools, routes, the review skill) is in [HERMES.md](HERMES.md).

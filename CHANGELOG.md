@@ -13,6 +13,22 @@ the `v*` tags.
   passed. The rule (at most `vault_short_terms` content words: a shared word or
   `vault_short_min_cosine` needed) now applies on both paths; a message that names the note
   still passes. Serving without rerank rules is unchanged.
+- **"What was it before": past values in recall.** When a turn asks about the past, prefetch
+  now also serves the values its claims replaced, each under its current claim, newest first,
+  as an indented `previously (from … until …; replaced by #N, not current)` line. Only an
+  accepted value that a newer fact superseded counts: an owner's edit is a rewording of the
+  same value, and forgotten, rejected, expired and pending claims never come back. Past values
+  share their claim's gate verdict and the claims cap (6, at most 3 per claim). Past intent
+  is a small lexical detector in English, Russian and German ("before", "used to",
+  "previously", "earlier", "back then", "what was", "раньше", "до этого", "früher",
+  "damals", a past year or date; weak words need a past-tense verb, so "Before I go, …" is
+  not one). The past path is one recursive SQL query; other turns run nothing extra.
+- `/v1/prefetch` takes `include_history` (true forces the past path, false turns it off) and
+  reports `history: {asked, items}`; `evidence_bundle` takes `include_history` and then adds
+  `memory_history` (matching memories with the values they replaced), so the assistant can ask
+  for history when recall did not show it. Without the flag the tool's reply is unchanged.
+- The plugin guide, the `memory-caller` skill (2.1.0), `/quoth recall` and the WebUI recall
+  view show past values as past, never as current facts.
 
 ### Evals
 
@@ -22,6 +38,15 @@ the `v*` tags.
   New `judged_precision` counts only items whose rightness is known (vault items, claims on
   `claims_judged` rows, any matched item); the sweep's objective uses it, so such a gate ties
   and the gentler config wins. `injected_precision` is unchanged in receipts.
+- **`follow` on claim anchors.** `current` (default, as before), `edits` (rewordings only:
+  the value as it was; a superseded value resolves as `historical`, reported in
+  `claims_gold.historical`) or `none` (that exact claim; an old wording is `edited`). A past
+  value injected under its claim matches such gold like any claim. `stores.claims.history_rate`
+  counts rows where a past value was injected; `eval sweep` replays past values with their claim.
+- `eval label-claims` also offers past values (marked, `follow: edits` once picked) to rows
+  whose question asks about the past.
+- The public claims set gains three "what was it before" rows and one past-intent false
+  positive (10 rows).
 
 ## 0.18.2 — clear dropped copies, a stale-core health check, stricter presort, claims gold
 
