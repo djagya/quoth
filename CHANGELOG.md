@@ -3,7 +3,9 @@
 Notable changes, newest first. Versions follow `version` in `pyproject.toml`; releases are
 the `v*` tags.
 
-## Unreleased
+## 0.19.1 — a second look at presort accepts
+
+Only the `memory-review` skill changed (3.8.0): reinstall the plugin. No code, index or ledger change.
 
 ### Review
 
