@@ -8,7 +8,7 @@ license-files = ["LICENSE"]
 dependencies = ["mcp>=2.2,<3", "numpy>=2"]
 
 [project.optional-dependencies]
-dense = ["onnxruntime>=1.20", "tokenizers>=0.20"]
+dense = ["onnxruntime>=1.31.1", "tokenizers>=0.20"]
 
 [project.scripts]
 quoth = "quoth.cli:main"
@@ -26,7 +26,7 @@ packages = ["src/quoth"]
 "web/control-surface" = "quoth/_webui_extension"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=9.2.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
